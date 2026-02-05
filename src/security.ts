@@ -1,25 +1,20 @@
-import crypto from "crypto";
-import { stableStringify } from "./stable-json";
+import crypto from "node:crypto";
+import { stableStringify } from "./stable-json.js";
 
-export type SignableCommand = {
-  node_id: string;
-  command: string;
-  payload: Record<string, unknown>;
-  project_id: string;
-  ts: string;
-};
+export function signCommand(secret: string, input: { id: string; node_id: string; command: string; payload: any }) {
+  const canonical = stableStringify({
+    id: input.id,
+    node_id: input.node_id,
+    command: input.command,
+    payload: input.payload ?? {}
+  });
+  return crypto.createHmac("sha256", secret).update(canonical).digest("base64");
+}
 
-export function verifySignature(cmd: SignableCommand, signature: string): boolean {
-  const secret = process.env.HOCKER_COMMAND_SIGNING_SECRET ?? "";
-  if (!secret) throw new Error("Missing HOCKER_COMMAND_SIGNING_SECRET");
-
-  const canonical = stableStringify(cmd);
-  const key = Buffer.from(secret, "base64");
-  const expected = crypto.createHmac("sha256", key).update(canonical).digest("hex");
-
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"));
-  } catch {
-    return false;
-  }
+export function verifySignature(secret: string, sig: string, input: { id: string; node_id: string; command: string; payload: any }) {
+  const expected = signCommand(secret, input);
+  const a = Buffer.from(String(sig || ""));
+  const b = Buffer.from(String(expected || ""));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
