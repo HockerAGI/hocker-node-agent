@@ -1,210 +1,157 @@
-import http from "node:http";
-import { spawn } from "node:child_process";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import "dotenv/config";
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
+import { supabaseAdmin } from "./supabase.js";
+import { verifySig } from "./security.js";
 
-import { sbAdmin } from "./supabase.js";
-import { verifySignature } from "./security.js";
+const exec = promisify(execCb);
 
-const PORT = Number(process.env.PORT ?? "8080");
-const NODE_ID = process.env.NODE_ID ?? "node-cloudrun-01";
-const PROJECT_ID = process.env.PROJECT_ID ?? "global";
-const POLL_MS = Number(process.env.POLL_MS ?? "1500");
+const PROJECT_ID = process.env.HOCKER_PROJECT_ID!;
+const NODE_ID = process.env.HOCKER_NODE_ID!;
+const WORKDIR = process.env.HOCKER_WORKDIR || process.cwd();
 
-const SIGNING_SECRET = process.env.HOCKER_COMMAND_SIGNING_SECRET ?? "";
-if (!SIGNING_SECRET) throw new Error("Falta HOCKER_COMMAND_SIGNING_SECRET");
+// Allowlist default (ajústalo)
+const DEFAULT_ALLOW = [
+  /^uname\b/, /^node\b/, /^npm\b/, /^pnpm\b/, /^yarn\b/,
+  /^git\b/, /^pm2\b/,
+  /^ls\b/, /^cat\b/, /^pwd\b/, /^whoami\b/, /^df\b/, /^free\b/
+];
+const CUSTOM_ALLOW = (process.env.HOCKER_SHELL_ALLOWLIST || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map((rx) => new RegExp(rx));
 
-const SANDBOX = process.env.AGENT_SANDBOX_DIR ?? "/tmp/hocker-sandbox";
-const allowlist = (process.env.SHELL_ALLOWLIST ?? "").split(",").map(s => s.trim()).filter(Boolean);
-const SHELL_TIMEOUT_MS = Number(process.env.SHELL_TIMEOUT_MS ?? "15000");
-const SHELL_MAX_OUTPUT_KB = Number(process.env.SHELL_MAX_OUTPUT_KB ?? "256");
-
-function nowIso() { return new Date().toISOString(); }
-
-function safeJoin(rel: string) {
-  const clean = rel.replace(/^(\.\.(\/|\\|$))+/, "").replace(/^\/+/, "");
-  const p = path.resolve(SANDBOX, clean);
-  if (!p.startsWith(path.resolve(SANDBOX))) throw new Error("Path fuera de sandbox");
-  return p;
+function allowedShell(cmd: string) {
+  const list = CUSTOM_ALLOW.length ? CUSTOM_ALLOW : DEFAULT_ALLOW;
+  return list.some(rx => rx.test(cmd.trim()));
 }
 
-async function ensureSandbox() {
-  await fs.mkdir(SANDBOX, { recursive: true });
+function safePath(rel: string) {
+  const full = path.resolve(WORKDIR, rel);
+  const root = path.resolve(WORKDIR);
+  if (!full.startsWith(root)) throw new Error("Path escape blocked");
+  return full;
 }
 
-async function heartbeat(sb: ReturnType<typeof sbAdmin>) {
-  await sb.from("nodes").upsert(
-    {
-      id: NODE_ID,
-      project_id: PROJECT_ID,
-      name: NODE_ID,
-      type: "agent",
-      status: "online",
-      last_seen_at: nowIso(),
-      meta: { agent: "hocker-node-agent", sandbox: SANDBOX, platform: "cloudrun" }
-    },
-    { onConflict: "id" }
-  );
+async function heartbeat(sb: ReturnType<typeof supabaseAdmin>) {
+  await sb.from("nodes").upsert({
+    id: NODE_ID,
+    project_id: PROJECT_ID,
+    name: process.env.HOCKER_NODE_NAME || "node-agent",
+    status: "online",
+    last_seen: new Date().toISOString()
+  });
 }
 
-async function systemFlags(sb: ReturnType<typeof sbAdmin>) {
+async function killSwitchOn(sb: ReturnType<typeof supabaseAdmin>) {
+  const { data } = await sb.from("system_controls").select("kill_switch").eq("id", "global").maybeSingle();
+  return data?.kill_switch === true;
+}
+
+async function nextCommand(sb: ReturnType<typeof supabaseAdmin>) {
   const { data } = await sb
-    .from("system_controls")
-    .select("kill_switch, allow_shell, allow_filesystem")
-    .eq("project_id", PROJECT_ID)
-    .eq("id", "global")
-    .maybeSingle();
-
-  return {
-    kill: Boolean(data?.kill_switch),
-    allowShell: Boolean(data?.allow_shell),
-    allowFs: data?.allow_filesystem !== false
-  };
-}
-
-async function execShell(cmd: string, args: string[]) {
-  if (!allowlist.includes(cmd)) throw new Error(`Shell bloqueado: ${cmd} (no está en allowlist)`);
-
-  const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-
-  let out = "";
-  let err = "";
-  const cap = SHELL_MAX_OUTPUT_KB * 1024;
-  const t = setTimeout(() => child.kill("SIGKILL"), SHELL_TIMEOUT_MS);
-
-  child.stdout.on("data", (d) => { if (out.length < cap) out += d.toString(); });
-  child.stderr.on("data", (d) => { if (err.length < cap) err += d.toString(); });
-
-  const code: number = await new Promise((resolve) => child.on("close", resolve));
-  clearTimeout(t);
-
-  return { code, out: out.slice(0, cap), err: err.slice(0, cap) };
-}
-
-async function handleCommand(command: string, payload: any, flags: { allowShell: boolean; allowFs: boolean }) {
-  if (command === "status") {
-    return {
-      ok: true,
-      node: NODE_ID,
-      project: PROJECT_ID,
-      host: os.hostname(),
-      uptime_sec: Math.floor(os.uptime()),
-      loadavg: os.loadavg(),
-      mem: { total: os.totalmem(), free: os.freemem() },
-      time: nowIso()
-    };
-  }
-
-  if (command === "fs.list") {
-    if (!flags.allowFs) throw new Error("FS deshabilitado por system_controls");
-    await ensureSandbox();
-    const rel = String(payload?.path ?? "");
-    const p = safeJoin(rel || ".");
-    const items = await fs.readdir(p, { withFileTypes: true });
-    return items.map((d) => ({ name: d.name, type: d.isDirectory() ? "dir" : "file" }));
-  }
-
-  if (command === "fs.read") {
-    if (!flags.allowFs) throw new Error("FS deshabilitado por system_controls");
-    await ensureSandbox();
-    const rel = String(payload?.path ?? "");
-    const p = safeJoin(rel);
-    const data = await fs.readFile(p, "utf8");
-    return { ok: true, content: data };
-  }
-
-  if (command === "fs.write") {
-    if (!flags.allowFs) throw new Error("FS deshabilitado por system_controls");
-    await ensureSandbox();
-    const rel = String(payload?.path ?? "");
-    const p = safeJoin(rel);
-    const content = String(payload?.content ?? "");
-    await fs.mkdir(path.dirname(p), { recursive: true });
-    await fs.writeFile(p, content, "utf8");
-    return { ok: true, path: rel, bytes: Buffer.byteLength(content) };
-  }
-
-  if (command === "shell.exec") {
-    if (!flags.allowShell) throw new Error("Shell deshabilitado por system_controls");
-    const cmd = String(payload?.cmd ?? "");
-    const args = Array.isArray(payload?.args) ? payload.args.map(String) : [];
-    if (!cmd) throw new Error("Falta payload.cmd");
-    return await execShell(cmd, args);
-  }
-
-  throw new Error(`Comando desconocido: ${command}`);
-}
-
-async function loopOnce(sb: ReturnType<typeof sbAdmin>) {
-  const flags = await systemFlags(sb);
-
-  if (flags.kill) {
-    await sb.from("events").insert({
-      project_id: PROJECT_ID,
-      node_id: NODE_ID,
-      level: "warn",
-      type: "agent.paused",
-      message: "Kill-switch activo, agent en pausa",
-      data: {}
-    });
-    return;
-  }
-
-  const { data: cmds } = await sb
     .from("commands")
-    .select("id, project_id, node_id, command, payload, signature, status")
+    .select("*")
     .eq("project_id", PROJECT_ID)
     .eq("node_id", NODE_ID)
     .eq("status", "queued")
     .order("created_at", { ascending: true })
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
 
-  const cmd = (cmds ?? [])[0];
-  if (!cmd) return;
+async function setStatus(sb: ReturnType<typeof supabaseAdmin>, id: string, status: string, result?: any) {
+  await sb.from("commands").update({ status, result }).eq("id", id);
+}
 
-  const okSig = verifySignature(SIGNING_SECRET, cmd.signature, {
-    id: cmd.id,
-    project_id: cmd.project_id,
-    node_id: cmd.node_id,
-    command: cmd.command,
-    payload: cmd.payload ?? {}
+async function log(sb: ReturnType<typeof supabaseAdmin>, type: string, message: string, meta: any = {}) {
+  await sb.from("events").insert({
+    project_id: PROJECT_ID,
+    type,
+    message,
+    meta: { node_id: NODE_ID, ...meta }
   });
-
-  if (!okSig) {
-    await sb.from("commands").update({ status: "failed", error: "Firma inválida", finished_at: nowIso() }).eq("id", cmd.id);
-    return;
-  }
-
-  await sb.from("commands").update({ status: "running", executed_at: nowIso() }).eq("id", cmd.id);
-
-  try {
-    const result = await handleCommand(cmd.command, cmd.payload, { allowShell: flags.allowShell, allowFs: flags.allowFs });
-    await sb.from("commands").update({ status: "succeeded", result, finished_at: nowIso() }).eq("id", cmd.id);
-  } catch (e: any) {
-    await sb.from("commands").update({ status: "failed", error: String(e?.message ?? e), finished_at: nowIso() }).eq("id", cmd.id);
-  }
 }
 
 async function main() {
-  const sb = sbAdmin();
+  if (!PROJECT_ID || !NODE_ID) throw new Error("Missing HOCKER_PROJECT_ID / HOCKER_NODE_ID");
+  const sb = supabaseAdmin();
 
-  // server mínimo para Cloud Run
-  http.createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, node: NODE_ID, project: PROJECT_ID }));
-  }).listen(PORT, () => {
-    console.log(`[agent] http listening on :${PORT}`);
-  });
+  await log(sb, "agent.start", "Node Agent online", { workdir: WORKDIR });
 
-  // heartbeat continuo
-  setInterval(() => heartbeat(sb).catch(() => {}), 5000);
-  await heartbeat(sb);
-
-  // loop
   while (true) {
-    await loopOnce(sb).catch(() => {});
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    try {
+      await heartbeat(sb);
+
+      if (await killSwitchOn(sb)) {
+        await log(sb, "agent.killswitch", "Kill switch active. Sleeping...");
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+
+      const cmd = await nextCommand(sb);
+      if (!cmd) {
+        await new Promise(r => setTimeout(r, 800));
+        continue;
+      }
+
+      // firma (si viene del panel)
+      const okSig = verifySig(cmd);
+      if (!okSig) {
+        await setStatus(sb, cmd.id, "failed", { error: "Bad signature" });
+        await log(sb, "command.failed", "Bad signature", { command_id: cmd.id });
+        continue;
+      }
+
+      await setStatus(sb, cmd.id, "running");
+      await log(sb, "command.running", cmd.command, { command_id: cmd.id });
+
+      if (cmd.command === "fs.list") {
+        const dir = safePath(cmd.payload?.path || ".");
+        const items = await fs.readdir(dir);
+        await setStatus(sb, cmd.id, "done", { items });
+      }
+
+      else if (cmd.command === "fs.read") {
+        const file = safePath(cmd.payload?.path);
+        const content = await fs.readFile(file, "utf8");
+        await setStatus(sb, cmd.id, "done", { content });
+      }
+
+      else if (cmd.command === "fs.write") {
+        const file = safePath(cmd.payload?.path);
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, String(cmd.payload?.content || ""), "utf8");
+        await setStatus(sb, cmd.id, "done", { ok: true, path: cmd.payload?.path });
+      }
+
+      else if (cmd.command === "shell.exec") {
+        const c = String(cmd.payload?.cmd || "");
+        const timeoutMs = Number(cmd.payload?.timeoutMs || 60000);
+
+        if (!allowedShell(c)) {
+          await setStatus(sb, cmd.id, "failed", { error: "Shell command blocked by allowlist", cmd: c });
+        } else {
+          const { stdout, stderr } = await exec(c, { cwd: WORKDIR, timeout: timeoutMs });
+          await setStatus(sb, cmd.id, "done", { stdout, stderr });
+        }
+      }
+
+      else {
+        await setStatus(sb, cmd.id, "failed", { error: "Unknown command" });
+      }
+
+      await log(sb, "command.done", cmd.command, { command_id: cmd.id });
+    } catch (e: any) {
+      const sb = supabaseAdmin();
+      await log(sb, "agent.error", e?.message || "error", { stack: e?.stack });
+      await new Promise(r => setTimeout(r, 1200));
+    }
   }
 }
 
