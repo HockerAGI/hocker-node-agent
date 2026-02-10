@@ -1,19 +1,24 @@
 {
   "name": "hocker-node-agent",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "node --env-file=.env --no-warnings ./node_modules/tsx/dist/cli.mjs src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js"
+    "start": "node --env-file=.env --no-warnings dist/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.1"
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.3"
+    "@types/node": "^20.14.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
