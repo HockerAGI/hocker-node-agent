@@ -5,9 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "node --env-file=.env --no-warnings ./node_modules/tsx/dist/cli.mjs src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node --env-file=.env --no-warnings dist/index.js"
+    "start": "node dist/index.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
