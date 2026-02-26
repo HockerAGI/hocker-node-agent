@@ -1,57 +1,81 @@
+import path from "node:path";
+import fs from "node:fs/promises";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { config } from "../config.js";
 
 const execAsync = promisify(exec);
 
-export type ExecutionResult = {
-  ok: boolean;
-  data?: any;
-  error?: string;
+export type DirEntry = {
+  name: string;
+  type: "file" | "dir" | "other";
+  size?: number;
+  mtime?: string;
 };
 
-/**
- * Motor de Ejecución Física (Hacker/NASA Level)
- * Capaz de ejecutar procesos efímeros o sesiones largas de Chido Wins.
- */
-export async function executeLocalCommand(command: string, payload: any): Promise<ExecutionResult> {
-  try {
-    switch (command) {
-      case "shell.exec":
-        const script = payload?.script;
-        // Dinámico: Si es un bot de casino, le damos hasta 15 minutos (900000ms), si no, 2 mins.
-        const timeoutMs = payload?.timeout || 120000; 
-        
-        if (!script) throw new Error("Falla táctica: Falta payload.script");
-        
-        // Ejecución robusta con buffer amplio para logs pesados de Python/Selenium
-        const { stdout, stderr } = await execAsync(script, { 
-            timeout: timeoutMs,
-            maxBuffer: 1024 * 1024 * 10 // 10MB de buffer para evitar crash por logs
-        }); 
-        
-        return { ok: true, data: { stdout: stdout.trim(), stderr: stderr.trim() } };
+export function sandboxRoot(): string {
+  return path.resolve(process.cwd(), config.sandboxRoot);
+}
 
-      case "fs.write":
-        const fs = await import("node:fs/promises");
-        const path = payload?.path;
-        const content = payload?.content;
-        if (!path || !content) throw new Error("Falla táctica: Falta path o content");
-        
-        await fs.writeFile(path, content, "utf-8");
-        return { ok: true, data: { message: `Archivo inyectado en ${path}` } };
+export function safeSandboxPath(rel: string): string {
+  const root = sandboxRoot();
+  const cleaned = String(rel || ".").trim() || ".";
+  const full = path.resolve(root, cleaned);
 
-      case "ping":
-        return { ok: true, data: { message: "pong", timestamp: new Date().toISOString() } };
-
-      default:
-        return { ok: false, error: `Protocolo desconocido: '${command}' no está mapeado en la Matriz local.` };
-    }
-  } catch (error: any) {
-    // Si el proceso es asesinado por timeout, avisamos a Numia/NOVA para no contar la apuesta
-    const isTimeout = error.killed || error.signal === 'SIGTERM';
-    return { 
-        ok: false, 
-        error: isTimeout ? "[CRITICAL] Proceso asesinado por exceder el tiempo límite (Timeout)." : (error.message || "Error catastrófico en el sandbox.") 
-    };
+  // traversal guard original tuyo
+  if (!full.startsWith(root + path.sep) && full !== root) {
+    throw new Error("Ruta fuera de sandbox (blocked).");
   }
+  return full;
+}
+
+export async function listDir(relDir: string): Promise<DirEntry[]> {
+  const full = safeSandboxPath(relDir || ".");
+  const limit = Number(process.env.READ_DIR_LIMIT || 200);
+
+  const items = await fs.readdir(full, { withFileTypes: true });
+  const out: DirEntry[] = [];
+
+  for (const it of items.slice(0, limit)) {
+    const p = path.join(full, it.name);
+    let stat: any = null;
+    try { stat = await fs.stat(p); } catch {}
+
+    out.push({
+      name: it.name,
+      type: it.isDirectory() ? "dir" : it.isFile() ? "file" : "other",
+      size: stat?.isFile?.() ? stat.size : undefined,
+      mtime: stat?.mtime ? new Date(stat.mtime).toISOString() : undefined,
+    });
+  }
+  return out;
+}
+
+export async function readFileHead(relPath: string, maxBytes: number): Promise<{ bytes: number; text: string }> {
+  const full = safeSandboxPath(relPath);
+  const cap = Math.max(256, Math.min(maxBytes, Number(process.env.FILE_HEAD_BYTES || 65536)));
+
+  const buf = await fs.readFile(full);
+  const head = buf.subarray(0, cap);
+
+  const text = head.toString("utf8");
+  return { bytes: head.length, text };
+}
+
+// NUEVO: EJECUTOR SHELL PARA CHIDO WINS / SCRIPTS
+export async function executeLocalShell(script: string, timeoutMs: number = 120000): Promise<{ stdout: string; stderr: string }> {
+  if (!script) throw new Error("Script vacío no permitido.");
+  
+  const { stdout, stderr } = await execAsync(script, { 
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024 * 10 // 10MB para logs de puppeteer
+  }); 
+  return { stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+// NUEVO: ESCRITURA DE ARCHIVOS SEGURA DENTRO DEL SANDBOX
+export async function writeLocalFile(relPath: string, content: string): Promise<string> {
+  const full = safeSandboxPath(relPath);
+  await fs.writeFile(full, content, "utf-8");
+  return full;
 }
