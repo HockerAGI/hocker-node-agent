@@ -1,60 +1,47 @@
-import path from "node:path";
-import fs from "node:fs/promises";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 
-export type DirEntry = {
-  name: string;
-  type: "file" | "dir" | "other";
-  size?: number;
-  mtime?: string;
+const execAsync = promisify(exec);
+
+export type ExecutionResult = {
+  ok: boolean;
+  data?: any;
+  error?: string;
 };
 
-export function sandboxRoot(): string {
-  const root = String(process.env.SANDBOX_ROOT || "./sandbox");
-  return path.resolve(process.cwd(), root);
-}
+/**
+ * Ejecuta comandos mapeados a acciones físicas en la computadora.
+ */
+export async function executeLocalCommand(command: string, payload: any): Promise<ExecutionResult> {
+  try {
+    switch (command) {
+      case "shell.exec":
+        // Ejecuta un comando en la terminal local
+        const script = payload?.script;
+        if (!script) throw new Error("Falta payload.script para shell.exec");
+        
+        const { stdout, stderr } = await execAsync(script, { timeout: 60000 }); // Timeout de 1 min por seguridad
+        return { ok: true, data: { stdout: stdout.trim(), stderr: stderr.trim() } };
 
-export function safeSandboxPath(rel: string): string {
-  const root = sandboxRoot();
-  const cleaned = String(rel || ".").trim() || ".";
-  const full = path.resolve(root, cleaned);
+      case "fs.write":
+        // Ejemplo: Escribir un archivo de configuración en disco
+        const fs = await import("node:fs/promises");
+        const path = payload?.path;
+        const content = payload?.content;
+        if (!path || !content) throw new Error("Falta path o content para fs.write");
+        
+        await fs.writeFile(path, content, "utf-8");
+        return { ok: true, data: { message: `Archivo escrito exitosamente en ${path}` } };
 
-  // traversal guard
-  if (!full.startsWith(root + path.sep) && full !== root) {
-    throw new Error("Ruta fuera de sandbox (blocked).");
+      case "ping":
+        // Prueba de latencia básica
+        return { ok: true, data: { message: "pong", timestamp: new Date().toISOString() } };
+
+      default:
+        // Si el agente no reconoce el comando nativo
+        return { ok: false, error: `Comando '${command}' no soportado por este Agente Físico.` };
+    }
+  } catch (error: any) {
+    return { ok: false, error: error.message || "Error desconocido en el sandbox." };
   }
-  return full;
-}
-
-export async function listDir(relDir: string): Promise<DirEntry[]> {
-  const full = safeSandboxPath(relDir || ".");
-  const limit = Number(process.env.READ_DIR_LIMIT || 200);
-
-  const items = await fs.readdir(full, { withFileTypes: true });
-  const out: DirEntry[] = [];
-
-  for (const it of items.slice(0, limit)) {
-    const p = path.join(full, it.name);
-    let stat: any = null;
-    try { stat = await fs.stat(p); } catch {}
-
-    out.push({
-      name: it.name,
-      type: it.isDirectory() ? "dir" : it.isFile() ? "file" : "other",
-      size: stat?.isFile?.() ? stat.size : undefined,
-      mtime: stat?.mtime ? new Date(stat.mtime).toISOString() : undefined,
-    });
-  }
-  return out;
-}
-
-export async function readFileHead(relPath: string, maxBytes: number): Promise<{ bytes: number; text: string }> {
-  const full = safeSandboxPath(relPath);
-  const cap = Math.max(256, Math.min(maxBytes, Number(process.env.FILE_HEAD_BYTES || 65536)));
-
-  const buf = await fs.readFile(full);
-  const head = buf.subarray(0, cap);
-
-  // texto “best effort”
-  const text = head.toString("utf8");
-  return { bytes: head.length, text };
 }
