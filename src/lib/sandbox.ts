@@ -10,38 +10,48 @@ export type ExecutionResult = {
 };
 
 /**
- * Ejecuta comandos mapeados a acciones físicas en la computadora.
+ * Motor de Ejecución Física (Hacker/NASA Level)
+ * Capaz de ejecutar procesos efímeros o sesiones largas de Chido Wins.
  */
 export async function executeLocalCommand(command: string, payload: any): Promise<ExecutionResult> {
   try {
     switch (command) {
       case "shell.exec":
-        // Ejecuta un comando en la terminal local
         const script = payload?.script;
-        if (!script) throw new Error("Falta payload.script para shell.exec");
+        // Dinámico: Si es un bot de casino, le damos hasta 15 minutos (900000ms), si no, 2 mins.
+        const timeoutMs = payload?.timeout || 120000; 
         
-        const { stdout, stderr } = await execAsync(script, { timeout: 60000 }); // Timeout de 1 min por seguridad
+        if (!script) throw new Error("Falla táctica: Falta payload.script");
+        
+        // Ejecución robusta con buffer amplio para logs pesados de Python/Selenium
+        const { stdout, stderr } = await execAsync(script, { 
+            timeout: timeoutMs,
+            maxBuffer: 1024 * 1024 * 10 // 10MB de buffer para evitar crash por logs
+        }); 
+        
         return { ok: true, data: { stdout: stdout.trim(), stderr: stderr.trim() } };
 
       case "fs.write":
-        // Ejemplo: Escribir un archivo de configuración en disco
         const fs = await import("node:fs/promises");
         const path = payload?.path;
         const content = payload?.content;
-        if (!path || !content) throw new Error("Falta path o content para fs.write");
+        if (!path || !content) throw new Error("Falla táctica: Falta path o content");
         
         await fs.writeFile(path, content, "utf-8");
-        return { ok: true, data: { message: `Archivo escrito exitosamente en ${path}` } };
+        return { ok: true, data: { message: `Archivo inyectado en ${path}` } };
 
       case "ping":
-        // Prueba de latencia básica
         return { ok: true, data: { message: "pong", timestamp: new Date().toISOString() } };
 
       default:
-        // Si el agente no reconoce el comando nativo
-        return { ok: false, error: `Comando '${command}' no soportado por este Agente Físico.` };
+        return { ok: false, error: `Protocolo desconocido: '${command}' no está mapeado en la Matriz local.` };
     }
   } catch (error: any) {
-    return { ok: false, error: error.message || "Error desconocido en el sandbox." };
+    // Si el proceso es asesinado por timeout, avisamos a Numia/NOVA para no contar la apuesta
+    const isTimeout = error.killed || error.signal === 'SIGTERM';
+    return { 
+        ok: false, 
+        error: isTimeout ? "[CRITICAL] Proceso asesinado por exceder el tiempo límite (Timeout)." : (error.message || "Error catastrófico en el sandbox.") 
+    };
   }
 }
