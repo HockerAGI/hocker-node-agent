@@ -1,17 +1,19 @@
 {
   "name": "hocker-node-agent",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
+  "version": "1.0.0",
+  "description": "Agente físico ejecutor para Hocker Automation Fabric",
   "main": "dist/index.js",
+  "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
-    "dotenv": "^16.4.5"
+    "@supabase/supabase-js": "^2.49.1",
+    "dotenv": "^16.4.5",
+    "zod": "^3.24.1",
+    "langfuse-node": "^3.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
