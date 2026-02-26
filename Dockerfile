@@ -1,23 +1,28 @@
-# -------- Builder --------
 FROM node:20-slim AS builder
+
 WORKDIR /app
-COPY package.json tsconfig.json ./
-COPY src ./src
-COPY README.md .
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm install
+COPY . .
 RUN npm run build
 
-# -------- Runner --------
 FROM node:20-slim
-WORKDIR /app
-ENV NODE_ENV=production
-ENV PORT=8080
 
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# Instalar utilidades básicas y dumb-init
+RUN apt-get update && \
+    apt-get install -y dumb-init procps && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
 
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/README.md ./README.md
+COPY --from=builder /app/node_modules ./node_modules
+COPY package.json ./
 
-EXPOSE 8080
-CMD ["node","dist/index.js"]
+# OpSec: Usuario sin privilegios
+RUN useradd -m hocker
+USER hocker
+
+# Usar dumb-init para evitar procesos zombies (Vital para scripts de puppeteer o casino)
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "dist/index.js"]
