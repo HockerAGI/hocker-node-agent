@@ -1,23 +1,32 @@
 import crypto from "node:crypto";
 
-function sortKeysDeep(obj: any): any {
-  if (Array.isArray(obj)) return obj.map(sortKeysDeep);
-  if (obj && typeof obj === "object") {
+function sortKeysDeep(value: any): any {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value && typeof value === "object") {
     const out: Record<string, any> = {};
-    for (const k of Object.keys(obj).sort()) out[k] = sortKeysDeep(obj[k]);
+    for (const k of Object.keys(value).sort()) out[k] = sortKeysDeep(value[k]);
     return out;
   }
-  return obj;
+  return value;
 }
 
 function canonicalJson(value: any): string {
   return JSON.stringify(sortKeysDeep(value ?? {}));
 }
 
-/**
- * ✅ ESTÁNDAR REAL (alineado con hocker.one y nova.agi)
- * base = id|project_id|node_id|command|created_at|canonical(payload)
- */
+export function signCommandFabric(
+  secret: string,
+  id: string,
+  project_id: string,
+  node_id: string,
+  command: string,
+  payload: any,
+  created_at: string
+): string {
+  const base = [id, project_id, node_id, command, created_at, canonicalJson(payload)].join("|");
+  return crypto.createHmac("sha256", secret).update(base).digest("hex");
+}
+
 export function signCommandV2(
   secret: string,
   id: string,
@@ -31,15 +40,12 @@ export function signCommandV2(
   return crypto.createHmac("sha256", secret).update(base).digest("hex");
 }
 
-/**
- * Legacy V1 (compat): no lo usamos para firmar, solo para verificar si hay comandos viejos.
- */
 function stableJson(value: any): string {
   if (value === null || value === undefined) return "null";
   if (typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   const keys = Object.keys(value).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson((value as any)[k])}`).join(",")}}`;
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
 }
 
 function signCommandV1Hex(secret: string, id: string, created_at: string, payload: any): string {
@@ -75,10 +81,8 @@ export function verifyCommand(
 ): boolean {
   if (!signature) return false;
 
-  // ✅ principal
+  if (timingSafeEq(signature, signCommandFabric(secret, id, project_id, node_id, command, payload, created_at))) return true;
   if (timingSafeEq(signature, signCommandV2(secret, id, project_id, node_id, command, payload, created_at))) return true;
-
-  // legacy
   if (timingSafeEq(signature, signCommandV1Hex(secret, id, created_at, payload))) return true;
   if (timingSafeEq(signature, signCommandV1B64(secret, id, created_at, payload))) return true;
 
