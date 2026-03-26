@@ -22,7 +22,6 @@ export function safeSandboxPath(rel: string): string {
   const cleaned = String(rel || ".").trim() || ".";
   const full = path.resolve(root, cleaned);
 
-  // traversal guard original tuyo
   if (!full.startsWith(root + path.sep) && full !== root) {
     throw new Error("Ruta fuera de sandbox (blocked).");
   }
@@ -39,7 +38,9 @@ export async function listDir(relDir: string): Promise<DirEntry[]> {
   for (const it of items.slice(0, limit)) {
     const p = path.join(full, it.name);
     let stat: any = null;
-    try { stat = await fs.stat(p); } catch {}
+    try {
+      stat = await fs.stat(p);
+    } catch {}
 
     out.push({
       name: it.name,
@@ -55,27 +56,40 @@ export async function readFileHead(relPath: string, maxBytes: number): Promise<{
   const full = safeSandboxPath(relPath);
   const cap = Math.max(256, Math.min(maxBytes, Number(process.env.FILE_HEAD_BYTES || 65536)));
 
-  const buf = await fs.readFile(full);
-  const head = buf.subarray(0, cap);
-
-  const text = head.toString("utf8");
-  return { bytes: head.length, text };
+  const fh = await fs.open(full, "r");
+  try {
+    const buf = Buffer.allocUnsafe(cap);
+    const { bytesRead } = await fh.read(buf, 0, cap, 0);
+    return { bytes: bytesRead, text: buf.subarray(0, bytesRead).toString("utf8") };
+  } finally {
+    await fh.close();
+  }
 }
 
-// NUEVO: EJECUTOR SHELL PARA CHIDO WINS / SCRIPTS
-export async function executeLocalShell(script: string, timeoutMs: number = 120000): Promise<{ stdout: string; stderr: string }> {
-  if (!script) throw new Error("Script vacío no permitido.");
-  
-  const { stdout, stderr } = await execAsync(script, { 
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 1024 * 10 // 10MB para logs de puppeteer
-  }); 
-  return { stdout: stdout.trim(), stderr: stderr.trim() };
+export async function executeLocalShell(
+  script: string,
+  timeoutMs: number = 120000
+): Promise<{ stdout: string; stderr: string }> {
+  const cmd = String(script || "").trim();
+  if (!cmd) throw new Error("Script vacío no permitido.");
+
+  const bad = ["rm -rf /", "shutdown", "reboot", ":(){:|:&};:", "mkfs", "dd if="];
+  for (const b of bad) {
+    if (cmd.includes(b)) throw new Error("Comando bloqueado por seguridad.");
+  }
+
+  const { stdout, stderr } = await execAsync(cmd, {
+    timeout: timeoutMs,
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: sandboxRoot(),
+  });
+
+  return { stdout: (stdout || "").trim(), stderr: (stderr || "").trim() };
 }
 
-// NUEVO: ESCRITURA DE ARCHIVOS SEGURA DENTRO DEL SANDBOX
 export async function writeLocalFile(relPath: string, content: string): Promise<string> {
   const full = safeSandboxPath(relPath);
-  await fs.writeFile(full, content, "utf-8");
+  await fs.mkdir(path.dirname(full), { recursive: true });
+  await fs.writeFile(full, String(content ?? ""), "utf-8");
   return full;
 }
