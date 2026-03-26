@@ -1,6 +1,6 @@
 FROM node:20-slim AS builder
-WORKDIR /app
 
+WORKDIR /app
 COPY package.json ./
 RUN npm install
 
@@ -18,8 +18,6 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY package.json ./
-
-RUN npm prune --omit=dev || true
 
 RUN useradd -m hocker
 USER hocker
