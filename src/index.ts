@@ -59,7 +59,7 @@ function printBanner() {
     C.cyan +
       C.bold +
       `
-  ██╗  ██╗███████╗ ██████╗██╗  ██╗███████╗██████╗
+  ██╗  ██╗███████╗ ██████╗██╗  ██╗███████╗██████╗ 
   ██║  ██║██╔════╝██╔════╝██║ ██╔╝██╔════╝██╔══██╗
   ███████║█████╗  ██║     █████╔╝ █████╗  ██████╔╝
   ██╔══██║██╔══╝  ██║     ██╔═██╗ ██╔══╝  ██╔══██╗
@@ -77,11 +77,9 @@ function printBanner() {
   console.log(`${C.dim}======================================================${C.reset}\n`);
 }
 
-// Health server
 http
   .createServer((req, res) => {
     const u = new URL(req.url || "/", `http://127.0.0.1:${config.port}`);
-
     if (req.method === "GET" && u.pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(
@@ -89,11 +87,11 @@ http
           ok: true,
           project_id: config.projectId,
           node_id: config.nodeId,
+          orchestrator_url_configured: Boolean(config.orchestratorUrl),
           ts: nowIso(),
         })
       );
     }
-
     res.writeHead(404, { "content-type": "application/json" });
     return res.end(JSON.stringify({ ok: false, error: "not_found" }));
   })
@@ -155,13 +153,14 @@ async function upsertNode() {
       type: "agent",
       status: "online",
       last_seen_at: nowIso(),
+      tags: ["physical", "on-premise"],
       meta: {
         runtime: "node",
         version: process.version,
         platform: process.platform,
       },
     },
-    { onConflict: "project_id,id" }
+    { onConflict: "id" }
   );
 }
 
