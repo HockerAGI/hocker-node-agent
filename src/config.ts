@@ -1,6 +1,14 @@
 import { z } from "zod";
 import "dotenv/config";
 
+function readString(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 const Schema = z.object({
   port: z.coerce.number().int().positive().default(8080),
   pollMs: z.coerce.number().int().positive().default(2000),
@@ -29,26 +37,26 @@ const Schema = z.object({
 export type Config = z.infer<typeof Schema>;
 
 export const config: Config = Schema.parse({
-  port: process.env.PORT ? parseInt(process.env.PORT) : 8080,
-  pollMs: process.env.POLL_MS ? parseInt(process.env.POLL_MS) : 2000,
+  port: readString("PORT") ?? 8080,
+  pollMs: readString("POLL_MS") ?? 2000,
 
-  projectId: process.env.PROJECT_ID || process.env.HOCKER_PROJECT_ID || "global",
-  nodeId: process.env.NODE_ID || "hocker-node-1",
+  projectId: readString("PROJECT_ID", "HOCKER_PROJECT_ID") ?? "global",
+  nodeId: readString("NODE_ID") ?? "hocker-node-1",
 
-  orchestratorUrl: process.env.ORCHESTRATOR_URL || "",
+  orchestratorUrl: readString("ORCHESTRATOR_URL") ?? "",
 
   supabase: {
-    url: process.env.SUPABASE_URL,
-    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    url: readString("SUPABASE_URL"),
+    serviceRoleKey: readString("SUPABASE_SERVICE_ROLE_KEY"),
   },
 
-  commandHmacSecret: process.env.COMMAND_HMAC_SECRET,
+  commandHmacSecret: readString("COMMAND_HMAC_SECRET"),
 
-  sandboxRoot: process.env.SANDBOX_ROOT || "./sandbox",
+  sandboxRoot: readString("SANDBOX_ROOT") ?? "./sandbox",
 
   langfuse: {
-    publicKey: process.env.LANGFUSE_PUBLIC_KEY || "dummy",
-    secretKey: process.env.LANGFUSE_SECRET_KEY || "dummy",
-    baseUrl: process.env.LANGFUSE_BASE_URL || "https://cloud.langfuse.com",
+    publicKey: readString("LANGFUSE_PUBLIC_KEY") ?? "dummy",
+    secretKey: readString("LANGFUSE_SECRET_KEY") ?? "dummy",
+    baseUrl: readString("LANGFUSE_BASE_URL") ?? "https://cloud.langfuse.com",
   },
 });
