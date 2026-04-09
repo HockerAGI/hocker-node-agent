@@ -6,6 +6,19 @@ import { config } from "../config.js";
 
 const execAsync = promisify(exec);
 
+const READ_DIR_LIMIT = Number(process.env.READ_DIR_LIMIT ?? 200);
+const FILE_HEAD_BYTES = Number(process.env.FILE_HEAD_BYTES ?? 65_536);
+const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+
+const BLOCKED_PATTERNS = [
+  "rm -rf /",
+  "shutdown",
+  "reboot",
+  ":(){:|:&};:",
+  "mkfs",
+  "dd if=",
+];
+
 export type DirEntry = {
   name: string;
   type: "file" | "dir" | "other";
@@ -23,21 +36,19 @@ export function safeSandboxPath(rel: string): string {
   const full = path.resolve(root, cleaned);
 
   if (!full.startsWith(root + path.sep) && full !== root) {
-    throw new Error("Ruta fuera de sandbox (blocked).");
+    throw new Error("Ruta fuera del sandbox permitido.");
   }
   return full;
 }
 
 export async function listDir(relDir: string): Promise<DirEntry[]> {
   const full = safeSandboxPath(relDir || ".");
-  const limit = Number(process.env.READ_DIR_LIMIT || 200);
-
   const items = await fs.readdir(full, { withFileTypes: true });
   const out: DirEntry[] = [];
 
-  for (const it of items.slice(0, limit)) {
+  for (const it of items.slice(0, READ_DIR_LIMIT)) {
     const p = path.join(full, it.name);
-    let stat: any = null;
+    let stat: Awaited<ReturnType<typeof fs.stat>> | null = null;
     try {
       stat = await fs.stat(p);
     } catch {}
@@ -45,16 +56,19 @@ export async function listDir(relDir: string): Promise<DirEntry[]> {
     out.push({
       name: it.name,
       type: it.isDirectory() ? "dir" : it.isFile() ? "file" : "other",
-      size: stat?.isFile?.() ? stat.size : undefined,
+      size: stat?.isFile() ? stat.size : undefined,
       mtime: stat?.mtime ? new Date(stat.mtime).toISOString() : undefined,
     });
   }
   return out;
 }
 
-export async function readFileHead(relPath: string, maxBytes: number): Promise<{ bytes: number; text: string }> {
+export async function readFileHead(
+  relPath: string,
+  maxBytes: number
+): Promise<{ bytes: number; text: string }> {
   const full = safeSandboxPath(relPath);
-  const cap = Math.max(256, Math.min(maxBytes, Number(process.env.FILE_HEAD_BYTES || 65536)));
+  const cap = Math.max(256, Math.min(maxBytes, FILE_HEAD_BYTES));
 
   const fh = await fs.open(full, "r");
   try {
@@ -68,23 +82,27 @@ export async function readFileHead(relPath: string, maxBytes: number): Promise<{
 
 export async function executeLocalShell(
   script: string,
-  timeoutMs: number = 120000
+  timeoutMs = 120_000
 ): Promise<{ stdout: string; stderr: string }> {
   const cmd = String(script || "").trim();
-  if (!cmd) throw new Error("Script vacío no permitido.");
+  if (!cmd) throw new Error("El script no puede estar vacío.");
 
-  const bad = ["rm -rf /", "shutdown", "reboot", ":(){:|:&};:", "mkfs", "dd if="];
-  for (const b of bad) {
-    if (cmd.includes(b)) throw new Error("Comando bloqueado por seguridad.");
+  for (const pattern of BLOCKED_PATTERNS) {
+    if (cmd.includes(pattern)) {
+      throw new Error(`Comando bloqueado por política de seguridad: "${pattern}"`);
+    }
   }
 
   const { stdout, stderr } = await execAsync(cmd, {
     timeout: timeoutMs,
-    maxBuffer: 1024 * 1024 * 10,
+    maxBuffer: MAX_BUFFER_BYTES,
     cwd: sandboxRoot(),
   });
 
-  return { stdout: (stdout || "").trim(), stderr: (stderr || "").trim() };
+  return {
+    stdout: (stdout || "").trim(),
+    stderr: (stderr || "").trim(),
+  };
 }
 
 export async function writeLocalFile(relPath: string, content: string): Promise<string> {
