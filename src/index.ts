@@ -6,6 +6,8 @@ import { config } from "./config.js";
 import { verifyCommand } from "./lib/signature.js";
 import { listDir, readFileHead, executeLocalShell, writeLocalFile } from "./lib/sandbox.js";
 
+// ─── Tipos ────────────────────────────────────────────────────────────────────
+
 type Controls = { kill_switch: boolean; allow_write: boolean };
 
 type CommandRow = {
@@ -16,14 +18,16 @@ type CommandRow = {
   status: "queued" | "needs_approval" | "running" | "done" | "error" | "canceled";
   needs_approval: boolean;
   command: string;
-  payload: any;
+  payload: Record<string, unknown>;
   signature: string;
   started_at: string | null;
   executed_at: string | null;
   finished_at: string | null;
-  result: any;
+  result: unknown;
   error: string | null;
 };
+
+// ─── Clientes ─────────────────────────────────────────────────────────────────
 
 const sb = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
   auth: { persistSession: false },
@@ -35,15 +39,19 @@ const langfuse = new Langfuse({
   baseUrl: config.langfuse.baseUrl,
 });
 
+// ─── Terminal colors ──────────────────────────────────────────────────────────
+
 const C = {
-  cyan: "\x1b[36m",
-  green: "\x1b[32m",
+  cyan:   "\x1b[36m",
+  green:  "\x1b[32m",
   yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  dim: "\x1b[90m",
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-};
+  red:    "\x1b[31m",
+  dim:    "\x1b[90m",
+  reset:  "\x1b[0m",
+  bold:   "\x1b[1m",
+} as const;
+
+// ─── Utilidades ───────────────────────────────────────────────────────────────
 
 function nowIso() {
   return new Date().toISOString();
@@ -56,26 +64,25 @@ async function sleep(ms: number) {
 function printBanner() {
   console.clear();
   console.log(
-    C.cyan +
-      C.bold +
-      `
-  ██╗  ██╗███████╗ ██████╗██╗  ██╗███████╗██████╗ 
-  ██║  ██║██╔════╝██╔════╝██║ ██╔╝██╔════╝██╔══██╗
-  ███████║█████╗  ██║     █████╔╝ █████╗  ██████╔╝
-  ██╔══██║██╔══╝  ██║     ██╔═██╗ ██╔══╝  ██╔══██╗
-  ██║  ██║███████╗╚██████╗██║  ██╗███████╗██║  ██║
-  ╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-  ` +
-      C.reset
+    C.cyan + C.bold +
+`
+  ██╗  ██╗ ██████╗  ██████╗██╗  ██╗███████╗██████╗ 
+  ██║  ██║██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
+  ███████║██║   ██║██║     █████╔╝ █████╗  ██████╔╝
+  ██╔══██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
+  ██║  ██║╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║
+  ╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
+` + C.reset
   );
-
-  console.log(`${C.dim}======================================================${C.reset}`);
-  console.log(`${C.bold} NODO AGENTE FÍSICO (Zero-Trust) v2.0 - ONLINE${C.reset}`);
-  console.log(`${C.dim} Node ID    :${C.reset} ${C.green}${config.nodeId}${C.reset}`);
-  console.log(`${C.dim} Project ID :${C.reset} ${C.green}${config.projectId}${C.reset}`);
-  console.log(`${C.dim} Server Port:${C.reset} ${C.yellow}${config.port} (Health Checks Only)${C.reset}`);
-  console.log(`${C.dim}======================================================${C.reset}\n`);
+  console.log(`${C.dim}${"─".repeat(54)}${C.reset}`);
+  console.log(`${C.bold}  Node Agent — Zero-Trust Executor  v2.1${C.reset}`);
+  console.log(`${C.dim}  Node ID    :${C.reset} ${C.green}${config.nodeId}${C.reset}`);
+  console.log(`${C.dim}  Project ID :${C.reset} ${C.green}${config.projectId}${C.reset}`);
+  console.log(`${C.dim}  Health     :${C.reset} ${C.yellow}:${config.port}/health${C.reset}`);
+  console.log(`${C.dim}${"─".repeat(54)}${C.reset}\n`);
 }
+
+// ─── Servidor de salud ────────────────────────────────────────────────────────
 
 http
   .createServer((req, res) => {
@@ -87,7 +94,7 @@ http
           ok: true,
           project_id: config.projectId,
           node_id: config.nodeId,
-          orchestrator_url_configured: Boolean(config.orchestratorUrl),
+          orchestrator_configured: Boolean(config.orchestratorUrl),
           ts: nowIso(),
         })
       );
@@ -97,9 +104,15 @@ http
   })
   .listen(config.port, "0.0.0.0");
 
-async function emitEvent(level: "info" | "warn" | "error", type: string, message: string, data?: any) {
-  const metadata = data && typeof data === "object" ? data : {};
+// ─── Supabase helpers ─────────────────────────────────────────────────────────
 
+async function emitEvent(
+  level: "info" | "warn" | "error",
+  type: string,
+  message: string,
+  data?: Record<string, unknown>
+) {
+  const metadata = data ?? {};
   try {
     await sb.from("events").insert({
       project_id: config.projectId,
@@ -118,10 +131,7 @@ async function emitEvent(level: "info" | "warn" | "error", type: string, message
       agent_name: "hocker-node-agent",
       level,
       message,
-      metadata: {
-        type,
-        ...metadata,
-      },
+      metadata: { type, ...metadata },
     });
   } catch {}
 }
@@ -136,8 +146,8 @@ async function getControls(): Promise<Controls> {
       .maybeSingle();
 
     return {
-      kill_switch: Boolean((data as any)?.kill_switch),
-      allow_write: Boolean((data as any)?.allow_write),
+      kill_switch: Boolean((data as Record<string, unknown>)?.kill_switch),
+      allow_write: Boolean((data as Record<string, unknown>)?.allow_write),
     };
   } catch {
     return { kill_switch: false, allow_write: false };
@@ -149,7 +159,7 @@ async function upsertNode() {
     {
       id: config.nodeId,
       project_id: config.projectId,
-      name: `Physical Node: ${config.nodeId}`,
+      name: `Node: ${config.nodeId}`,
       type: "agent",
       status: "online",
       last_seen_at: nowIso(),
@@ -175,35 +185,27 @@ async function fetchQueued(): Promise<Pick<CommandRow, "id">[]> {
     .order("created_at", { ascending: true })
     .limit(5);
 
-  return (data as any) || [];
+  return (data as Pick<CommandRow, "id">[]) ?? [];
 }
 
 async function claimQueued(cmd: Pick<CommandRow, "id">): Promise<CommandRow | null> {
-  const started_at = nowIso();
-
   const { data } = await sb
     .from("commands")
-    .update({ status: "running", started_at })
+    .update({ status: "running", started_at: nowIso() })
     .eq("project_id", config.projectId)
     .eq("id", cmd.id)
     .eq("status", "queued")
     .select("*")
     .maybeSingle();
 
-  return (data as any) || null;
+  return (data as CommandRow) ?? null;
 }
 
-async function finishOk(id: string, result: any) {
+async function finishOk(id: string, result: unknown) {
   const ts = nowIso();
   await sb
     .from("commands")
-    .update({
-      status: "done",
-      executed_at: ts,
-      finished_at: ts,
-      result,
-      error: null,
-    })
+    .update({ status: "done", executed_at: ts, finished_at: ts, result, error: null })
     .eq("project_id", config.projectId)
     .eq("id", id);
 }
@@ -212,47 +214,35 @@ async function finishErr(id: string, msg: string) {
   const ts = nowIso();
   await sb
     .from("commands")
-    .update({
-      status: "error",
-      executed_at: ts,
-      finished_at: ts,
-      result: null,
-      error: msg,
-    })
+    .update({ status: "error", executed_at: ts, finished_at: ts, result: null, error: msg })
     .eq("project_id", config.projectId)
     .eq("id", id);
 }
 
-async function cancel(id: string, msg: string) {
+async function cancelCmd(id: string, msg: string) {
   const ts = nowIso();
   await sb
     .from("commands")
-    .update({
-      status: "canceled",
-      executed_at: ts,
-      finished_at: ts,
-      result: null,
-      error: msg,
-    })
+    .update({ status: "canceled", executed_at: ts, finished_at: ts, result: null, error: msg })
     .eq("project_id", config.projectId)
     .eq("id", id);
 }
 
-async function runCommand(cmd: CommandRow, controls: Controls) {
-  if (
-    !verifyCommand(
-      config.commandHmacSecret,
-      cmd.id,
-      cmd.project_id,
-      cmd.node_id,
-      cmd.command,
-      cmd.payload,
-      cmd.created_at,
-      cmd.signature
-    )
-  ) {
-    throw new Error("invalid_signature");
-  }
+// ─── Ejecutor de comandos ─────────────────────────────────────────────────────
+
+async function runCommand(cmd: CommandRow, controls: Controls): Promise<unknown> {
+  const valid = verifyCommand(
+    config.commandHmacSecret,
+    cmd.id,
+    cmd.project_id,
+    cmd.node_id,
+    cmd.command,
+    cmd.payload,
+    cmd.created_at,
+    cmd.signature
+  );
+
+  if (!valid) throw new Error("invalid_signature");
 
   const payload = cmd.payload ?? {};
   const command = String(cmd.command || "").trim();
@@ -274,24 +264,27 @@ async function runCommand(cmd: CommandRow, controls: Controls) {
       };
 
     case "read_dir": {
-      const relDir = String(payload.path || ".");
+      const relDir = String(payload.path ?? ".");
       return { ok: true, path: relDir, entries: await listDir(relDir) };
     }
 
     case "read_file_head": {
-      const relPath = String(payload.path || "");
-      const maxBytes = Math.min(256 * 1024, Math.max(128, Number(payload.maxBytes || 4096)));
+      const relPath = String(payload.path ?? "");
+      const maxBytes = Math.min(256 * 1024, Math.max(128, Number(payload.maxBytes ?? 4096)));
       const head = await readFileHead(relPath, maxBytes);
       return { ok: true, path: relPath, bytes: head.bytes, head: head.text };
     }
 
     case "shell.exec": {
-      const timeout = Number(payload.timeout || 120000);
-      return await executeLocalShell(String(payload.script || ""), timeout);
+      const timeout = Number(payload.timeout ?? 120_000);
+      return await executeLocalShell(String(payload.script ?? ""), timeout);
     }
 
     case "fs.write": {
-      const writtenPath = await writeLocalFile(String(payload.path || ""), String(payload.content ?? ""));
+      const writtenPath = await writeLocalFile(
+        String(payload.path ?? ""),
+        String(payload.content ?? "")
+      );
       return { ok: true, writtenPath };
     }
 
@@ -300,26 +293,27 @@ async function runCommand(cmd: CommandRow, controls: Controls) {
   }
 }
 
+// ─── Loop principal ───────────────────────────────────────────────────────────
+
 async function loop() {
   printBanner();
 
-  await emitEvent("info", "agent.boot", "Agent started (Hocker Fabric Ready)", {
+  await emitEvent("info", "agent.boot", "Hocker Node Agent iniciado", {
     node_id: config.nodeId,
     project_id: config.projectId,
   });
 
-  let lastHeartbeatLogAt = 0;
+  let lastHeartbeatAt = 0;
 
   while (true) {
     try {
       await upsertNode();
 
       const now = Date.now();
-      if (now - lastHeartbeatLogAt >= 60_000) {
-        lastHeartbeatLogAt = now;
+      if (now - lastHeartbeatAt >= 60_000) {
+        lastHeartbeatAt = now;
         await emitEvent("info", "node.heartbeat", "Heartbeat", {
           node_id: config.nodeId,
-          project_id: config.projectId,
           uptime: process.uptime(),
         });
       }
@@ -340,23 +334,24 @@ async function loop() {
         const cmd = await claimQueued(raw);
         if (!cmd) continue;
 
-        const timestamp = new Date().toLocaleTimeString();
+        const ts = new Date().toLocaleTimeString();
         console.log(
-          `${C.dim}[${timestamp}]${C.reset} ${C.yellow}⚡ EJECUTANDO:${C.reset} ${cmd.command} ${C.dim}(${cmd.id.split("-")[0]})${C.reset}`
+          `${C.dim}[${ts}]${C.reset} ${C.yellow}⚡ EJECUTANDO:${C.reset} ${cmd.command} ${C.dim}(${cmd.id.split("-")[0]})${C.reset}`
         );
 
         const controls2 = await getControls();
+
         if (controls2.kill_switch) {
-          await cancel(cmd.id, "Kill switch activado durante intercepción.");
-          await emitEvent("warn", "command.canceled", `Canceled by kill switch: ${cmd.command}`, {
+          await cancelCmd(cmd.id, "Kill-switch activado durante ejecución.");
+          await emitEvent("warn", "command.canceled", `Cancelado por kill-switch: ${cmd.command}`, {
             command_id: cmd.id,
           });
           continue;
         }
 
         if (!controls2.allow_write && (cmd.command === "shell.exec" || cmd.command === "fs.write")) {
-          await cancel(cmd.id, "Modo lectura activo (allow_write=false).");
-          await emitEvent("warn", "command.blocked", `Blocked by read-only mode: ${cmd.command}`, {
+          await cancelCmd(cmd.id, "Modo solo lectura activo.");
+          await emitEvent("warn", "command.blocked", `Bloqueado (modo solo lectura): ${cmd.command}`, {
             command_id: cmd.id,
           });
           continue;
@@ -367,35 +362,35 @@ async function loop() {
           metadata: { commandId: cmd.id, nodeId: config.nodeId, projectId: config.projectId },
         });
 
-        await emitEvent("info", "command.started", `Running: ${cmd.command}`, {
+        await emitEvent("info", "command.started", `Iniciando: ${cmd.command}`, {
           command_id: cmd.id,
         });
 
         try {
           const result = await runCommand(cmd, controls2);
           await finishOk(cmd.id, result);
-          await emitEvent("info", "command.done", `Done: ${cmd.command}`, {
+          await emitEvent("info", "command.done", `Completado: ${cmd.command}`, {
             command_id: cmd.id,
           });
-          trace.event({ name: "Success", output: result });
-          console.log(`${C.dim}[${timestamp}]${C.reset} ${C.green}✓ ÉXITO:${C.reset} Tarea completada.`);
-        } catch (e: any) {
-          const msg = String(e?.message || e);
+          trace.event({ name: "Success", output: result as object });
+          console.log(`${C.dim}[${ts}]${C.reset} ${C.green}✓ ÉXITO:${C.reset} ${cmd.command}`);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
           await finishErr(cmd.id, msg);
           await emitEvent("error", "command.error", `Error: ${cmd.command}`, {
             command_id: cmd.id,
             error: msg,
           });
           trace.event({ name: "Failed", level: "ERROR", statusMessage: msg });
-          console.log(`${C.dim}[${timestamp}]${C.reset} ${C.red}✖ FALLO:${C.reset} ${msg}`);
+          console.log(`${C.dim}[${ts}]${C.reset} ${C.red}✖ FALLO:${C.reset} ${msg}`);
         }
 
         await langfuse.flushAsync();
       }
 
       await sleep(config.pollMs);
-    } catch (e: any) {
-      console.error(C.red + "[LOOP ERROR]" + C.reset, e.message);
+    } catch (e: unknown) {
+      console.error(C.red + "[LOOP ERROR]" + C.reset, e instanceof Error ? e.message : e);
       await sleep(config.pollMs);
     }
   }
