@@ -6,7 +6,6 @@ if (!config.supabase.url || !config.supabase.serviceRoleKey) {
   process.exit(1);
 }
 
-// Inicializa el cliente con la llave maestra para saltar RLS y actuar como el sistema
 export const sb = createClient(
   config.supabase.url,
   config.supabase.serviceRoleKey,
@@ -14,7 +13,7 @@ export const sb = createClient(
     auth: {
       persistSession: false,
       autoRefreshToken: false,
-      detectSessionInUrl: false
-    }
+      detectSessionInUrl: false,
+    },
   }
 );
