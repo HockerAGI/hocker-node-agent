@@ -1,38 +1,43 @@
-import { spawn } from "node:child_process";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { config } from "../config.js";
+import type { JsonObject } from "../types.js";
 
-export interface SandboxResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  code: number;
-}
+type DB = {
+  public: {
+    Tables: {
+      commands: {
+        Row: {
+          id: string;
+          project_id: string;
+          node_id: string;
+          command: string;
+          payload: JsonObject;
+          signature: string;
+          status: string;
+          result: JsonObject | null;
+          error: string | null;
+          created_at: string;
+          executed_at: string | null;
+        };
+      };
+      events: {
+        Row: {
+          id: string;
+          project_id: string;
+          node_id: string | null;
+          type: string;
+          message: string;
+          level: string;
+          data: JsonObject | null;
+          created_at: string;
+        };
+      };
+    };
+  };
+};
 
-export async function runSandboxed(command: string, args: string[], timeoutMs = 15000): Promise<SandboxResult> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        PATH: process.env.PATH || "/usr/bin:/bin",
-        HOME: "/tmp",
-        NODE_ENV: "production"
-      }
-    });
-
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({
-        ok: code === 0,
-        stdout,
-        stderr,
-        code: code ?? -1
-      });
-    });
+export function createAdminSupabase(): SupabaseClient<DB> {
+  return createClient<DB>(config.supabaseUrl, config.supabaseServiceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false }
   });
 }
