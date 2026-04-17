@@ -1,22 +1,14 @@
-/**
- * Parsea una cadena JSON que puede estar envuelta en bloques de código markdown.
- * Retorna `null` si el texto está vacío o no es JSON válido.
- */
-export function parseStableJson(text: string): unknown {
-  if (!text) return null;
-
-  let clean = text.trim();
-
-  // Eliminar delimitadores de bloque de código markdown
-  if (clean.startsWith("```json")) clean = clean.slice(7);
-  else if (clean.startsWith("```")) clean = clean.slice(3);
-  if (clean.endsWith("```")) clean = clean.slice(0, -3);
-
-  clean = clean.trim();
-
-  try {
-    return JSON.parse(clean);
-  } catch {
-    return null;
-  }
+export function stableJson(value: unknown): string {
+  const walk = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(walk);
+    if (input && typeof input === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(input as Record<string, unknown>).sort()) {
+        out[k] = walk((input as Record<string, unknown>)[k]);
+      }
+      return out;
+    }
+    return input;
+  };
+  return JSON.stringify(walk(value ?? {}));
 }
