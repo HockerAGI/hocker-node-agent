@@ -1,62 +1,30 @@
-import { z } from "zod";
 import "dotenv/config";
+import { z } from "zod";
 
-function readString(...names: string[]): string | undefined {
-  for (const name of names) {
-    const value = process.env[name];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return undefined;
+function read(name: string): string {
+  return (process.env[name] ?? "").trim();
 }
 
 const Schema = z.object({
-  port: z.coerce.number().int().positive().default(8080),
-  pollMs: z.coerce.number().int().positive().default(2000),
-
-  projectId: z.string().min(1).default("global"),
-  nodeId: z.string().min(1).default("hocker-node-1"),
-
-  orchestratorUrl: z.string().trim().default(""),
-
-  supabase: z.object({
-    url: z.string().url(),
-    serviceRoleKey: z.string().min(20),
-  }),
-
-  commandHmacSecret: z.string().min(24),
-
-  sandboxRoot: z.string().default("./sandbox"),
-
-  langfuse: z.object({
-    publicKey: z.string().default("dummy"),
-    secretKey: z.string().default("dummy"),
-    baseUrl: z.string().url().default("https://cloud.langfuse.com"),
-  }),
+  port: z.coerce.number().int().positive().default(8081),
+  projectId: z.string().default("hocker-one"),
+  nodeId: z.string().default("hocker-node-1"),
+  agentKey: z.string().min(16),
+  hmacSecret: z.string().min(24),
+  supabaseUrl: z.string().url(),
+  supabaseServiceRoleKey: z.string().min(20),
+  maxCommandAgeMs: z.coerce.number().int().positive().default(5 * 60 * 1000),
+  sandboxEnabled: z.coerce.boolean().default(true)
 });
 
-export type Config = z.infer<typeof Schema>;
-
-export const config: Config = Schema.parse({
-  port: readString("PORT") ?? 8080,
-  pollMs: readString("POLL_MS") ?? 2000,
-
-  projectId: readString("PROJECT_ID", "HOCKER_PROJECT_ID") ?? "global",
-  nodeId: readString("NODE_ID") ?? "hocker-node-1",
-
-  orchestratorUrl: readString("ORCHESTRATOR_URL") ?? "",
-
-  supabase: {
-    url: readString("SUPABASE_URL"),
-    serviceRoleKey: readString("SUPABASE_SERVICE_ROLE_KEY"),
-  },
-
-  commandHmacSecret: readString("COMMAND_HMAC_SECRET"),
-
-  sandboxRoot: readString("SANDBOX_ROOT") ?? "./sandbox",
-
-  langfuse: {
-    publicKey: readString("LANGFUSE_PUBLIC_KEY") ?? "dummy",
-    secretKey: readString("LANGFUSE_SECRET_KEY") ?? "dummy",
-    baseUrl: readString("LANGFUSE_BASE_URL") ?? "https://cloud.langfuse.com",
-  },
+export const config = Schema.parse({
+  port: Number(read("PORT") || 8081),
+  projectId: read("PROJECT_ID") || "hocker-one",
+  nodeId: read("NODE_ID") || "hocker-node-1",
+  agentKey: read("HOCKER_AGENT_KEY"),
+  hmacSecret: read("HOCKER_COMMAND_HMAC_SECRET"),
+  supabaseUrl: read("SUPABASE_URL"),
+  supabaseServiceRoleKey: read("SUPABASE_SERVICE_ROLE_KEY"),
+  maxCommandAgeMs: Number(read("MAX_COMMAND_AGE_MS") || 300000),
+  sandboxEnabled: String(read("SANDBOX_ENABLED") || "true").toLowerCase() === "true"
 });
