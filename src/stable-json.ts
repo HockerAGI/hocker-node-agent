@@ -10,5 +10,6 @@ export function stableJson(value: unknown): string {
     }
     return input;
   };
+
   return JSON.stringify(walk(value ?? {}));
 }
