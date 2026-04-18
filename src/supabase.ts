@@ -1,14 +1,9 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
 
-if (!config.supabase.url || !config.supabase.serviceRoleKey) {
-  console.error("CRITICAL: SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY son obligatorios.");
-  process.exit(1);
-}
-
-export const sb = createClient(
-  config.supabase.url,
-  config.supabase.serviceRoleKey,
+export const sb: SupabaseClient = createClient(
+  config.supabaseUrl,
+  config.supabaseServiceRoleKey,
   {
     auth: {
       persistSession: false,
@@ -17,3 +12,7 @@ export const sb = createClient(
     },
   }
 );
+
+export function hasSupabaseCredentials(): boolean {
+  return Boolean(config.supabaseUrl && config.supabaseServiceRoleKey);
+}
