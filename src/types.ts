@@ -2,9 +2,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export type JsonObject = { [key: string]: JsonValue };
 
-export type AgentStatus = "idle" | "running" | "degraded" | "offline";
 export type CommandStatus = "queued" | "needs_approval" | "running" | "done" | "error" | "canceled";
-export type LogLevel = "info" | "warn" | "error";
 
 export interface AgentCommand {
   id: string;
@@ -23,15 +21,6 @@ export interface AgentCommand {
   error?: string | null;
 }
 
-export interface AgentResult {
-  ok: boolean;
-  command_id: string;
-  node_id: string;
-  project_id: string;
-  result?: JsonObject;
-  error?: string;
-}
-
 export interface Controls {
   kill_switch: boolean;
   allow_write: boolean;
@@ -43,6 +32,7 @@ export interface HealthResponse {
   node_id: string;
   orchestrator_configured: boolean;
   sandbox_enabled: boolean;
+  sandbox_root: string;
   ts: string;
 }
 
@@ -66,24 +56,4 @@ export interface ShellExecResult {
   stderr: string;
   timedOut: boolean;
   elapsedMs: number;
-}
-
-export interface Config {
-  port: number;
-  pollMs: number;
-  projectId: string;
-  nodeId: string;
-  agentKey: string;
-  hmacSecret: string;
-  supabaseUrl: string;
-  supabaseServiceRoleKey: string;
-  maxCommandAgeMs: number;
-  sandboxEnabled: boolean;
-  sandboxRoot: string;
-  orchestratorUrl: string | null;
-  langfuse: {
-    publicKey: string | null;
-    secretKey: string | null;
-    baseUrl: string;
-  };
 }
