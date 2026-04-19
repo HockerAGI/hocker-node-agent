@@ -1,6 +1,6 @@
 {
   "name": "hocker-node-agent",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "description": "Agente ejecutor seguro para HOCKER",
   "main": "dist/index.js",
   "type": "module",
@@ -13,7 +13,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.5",
-    "langfuse-node": "^3.38.6",
+    "fastify": "^4.28.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
