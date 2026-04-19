@@ -1,81 +1,17 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { config } from "./config.js";
 import { sb } from "./supabase.js";
-import type {
-  AgentCommand,
-  CommandStatus,
-  Controls,
-  HealthResponse,
-  JsonObject,
-} from "./types.js";
+import type { AgentCommand, Controls, HealthResponse, JsonObject } from "./types.js";
 import { verifyCommand } from "./lib/signature.js";
-import {
-  ensureSandbox,
-  executeLocalShell,
-  listDir,
-  readFileHead,
-  safeMetadata,
-  writeLocalFile,
-} from "./lib/sandbox.js";
-
-type CommandRow = AgentCommand & {
-  status: CommandStatus;
-  needs_approval: boolean;
-  started_at: string | null;
-  executed_at: string | null;
-  finished_at: string | null;
-  result: unknown;
-  error: string | null;
-};
-
-const C = {
-  cyan: "\x1b[36m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  dim: "\x1b[90m",
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-} as const;
+import { ensureSandbox, executeLocalShell, listDir, readFileHead, rootDir, safeMetadata, writeLocalFile } from "./lib/sandbox.js";
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
-function printBanner(): void {
-  console.clear();
-  console.log(
-    C.cyan + C.bold +
-      `
-  ██╗  ██╗ ██████╗  ██████╗██╗  ██╗███████╗██████╗ 
-  ██║  ██║██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
-  ███████║██║   ██║██║     █████╔╝ █████╗  ██████╔╝
-  ██╔══██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗
-  ██║  ██║╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║
-  ╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-` +
-      C.reset
-  );
-  console.log(`${C.dim}${"─".repeat(54)}${C.reset}`);
-  console.log(`${C.bold}  Node Agent — Zero-Trust Executor  v2.1${C.reset}`);
-  console.log(`${C.dim}  Node ID    :${C.reset} ${C.green}${config.nodeId}${C.reset}`);
-  console.log(`${C.dim}  Project ID :${C.reset} ${C.green}${config.projectId}${C.reset}`);
-  console.log(`${C.dim}  Health     :${C.reset} ${C.yellow}GET /health${C.reset}`);
-  console.log(`${C.dim}  Ready      :${C.reset} ${C.yellow}GET /ready${C.reset}`);
-  console.log(`${C.dim}${"─".repeat(54)}${C.reset}\n`);
-}
-
-async function emitEvent(
-  level: "info" | "warn" | "error",
-  type: string,
-  message: string,
-  data?: Record<string, unknown>
-): Promise<void> {
-  const metadata = data ?? {};
-
+async function emitEvent(level: "info" | "warn" | "error", type: string, message: string, data?: Record<string, unknown>): Promise<void> {
   try {
     await sb.from("events").insert({
       project_id: config.projectId,
@@ -83,289 +19,169 @@ async function emitEvent(
       level,
       type,
       message,
-      data: metadata,
+      data: (data ?? {}) as JsonObject,
     });
-  } catch {}
-
-  try {
-    await sb.from("agent_logs").insert({
-      project_id: config.projectId,
-      node_id: config.nodeId,
-      agent_name: "hocker-node-agent",
-      level,
-      message,
-      metadata: { type, ...metadata },
-    });
-  } catch {}
+  } catch {
+    // no-op
+  }
 }
 
 async function getControls(): Promise<Controls> {
   try {
     const { data } = await sb
       .from("system_controls")
-      .select("kill_switch, allow_write")
+      .select("kill_switch,allow_write")
       .eq("project_id", config.projectId)
       .eq("id", "global")
       .maybeSingle();
 
     return {
-      kill_switch: Boolean((data as Record<string, unknown> | null)?.kill_switch),
-      allow_write: Boolean((data as Record<string, unknown> | null)?.allow_write),
+      kill_switch: Boolean((data as { kill_switch?: unknown } | null)?.kill_switch),
+      allow_write: Boolean((data as { allow_write?: unknown } | null)?.allow_write),
     };
   } catch {
     return { kill_switch: false, allow_write: false };
   }
 }
 
-async function upsertNode(): Promise<void> {
+async function upsertNode(status: "online" | "degraded" | "offline" = "online"): Promise<void> {
   await sb.from("nodes").upsert(
     {
       id: config.nodeId,
       project_id: config.projectId,
       name: `Node: ${config.nodeId}`,
       type: "agent",
-      status: "online",
+      status,
       last_seen_at: nowIso(),
-      tags: ["physical", "on-premise"],
-      meta: {
-        runtime: "node",
-        version: process.version,
-        platform: process.platform,
-      },
+      tags: ["agent", "physical"],
+      meta: safeMetadata(),
+      updated_at: nowIso(),
     },
-    { onConflict: "id" }
+    { onConflict: "id" },
   );
 }
 
-async function fetchQueued(): Promise<Pick<CommandRow, "id">[]> {
-  const { data } = await sb
+async function fetchQueued(): Promise<AgentCommand[]> {
+  const { data, error } = await sb
     .from("commands")
-    .select("id")
+    .select("*")
     .eq("project_id", config.projectId)
     .eq("node_id", config.nodeId)
     .eq("status", "queued")
     .eq("needs_approval", false)
     .order("created_at", { ascending: true })
-    .limit(5);
+    .limit(10);
 
-  return (data as Pick<CommandRow, "id">[]) ?? [];
+  if (error) throw new Error(error.message);
+  return (data ?? []) as AgentCommand[];
 }
 
-async function claimQueued(cmd: Pick<CommandRow, "id">): Promise<CommandRow | null> {
-  const { data } = await sb
+async function markRunning(id: string): Promise<boolean> {
+  const { data, error } = await sb
     .from("commands")
     .update({ status: "running", started_at: nowIso() })
-    .eq("project_id", config.projectId)
-    .eq("id", cmd.id)
+    .eq("id", id)
     .eq("status", "queued")
-    .select("*")
+    .select("id")
     .maybeSingle();
 
-  return (data as CommandRow) ?? null;
+  if (error) return false;
+  return Boolean(data);
 }
 
-async function finishOk(id: string, result: unknown): Promise<void> {
-  const ts = nowIso();
-  await sb
-    .from("commands")
-    .update({ status: "done", executed_at: ts, finished_at: ts, result, error: null })
-    .eq("project_id", config.projectId)
-    .eq("id", id);
+async function finishDone(id: string, result: JsonObject): Promise<void> {
+  await sb.from("commands").update({ status: "done", result, executed_at: nowIso(), finished_at: nowIso(), error: null }).eq("id", id);
 }
 
-async function finishErr(id: string, msg: string): Promise<void> {
-  const ts = nowIso();
-  await sb
-    .from("commands")
-    .update({ status: "error", executed_at: ts, finished_at: ts, result: null, error: msg })
-    .eq("project_id", config.projectId)
-    .eq("id", id);
+async function finishErr(id: string, errorMessage: string): Promise<void> {
+  await sb.from("commands").update({ status: "error", error: errorMessage, finished_at: nowIso() }).eq("id", id);
 }
 
-async function cancelCmd(id: string, msg: string): Promise<void> {
-  const ts = nowIso();
-  await sb
-    .from("commands")
-    .update({ status: "canceled", executed_at: ts, finished_at: ts, result: null, error: msg })
-    .eq("project_id", config.projectId)
-    .eq("id", id);
-}
+async function executeCommand(command: AgentCommand, controls: Controls): Promise<JsonObject> {
+  const payload = (command.payload ?? {}) as Record<string, unknown>;
 
-function wantWrite(command: string): boolean {
-  return command === "shell.exec" || command === "fs.write";
-}
-
-async function runCommand(cmd: CommandRow, controls: Controls): Promise<unknown> {
-  const payload: JsonObject = safeMetadata(cmd.payload);
-  const command = String(cmd.command || "").trim();
-
-  const valid = verifyCommand(
-    config.hmacSecret,
-    cmd.id,
-    cmd.project_id,
-    cmd.node_id,
-    command,
-    payload,
-    cmd.created_at,
-    cmd.signature,
-    config.maxCommandAgeMs
-  );
-
-  if (!valid) {
-    throw new Error("invalid_signature");
-  }
-
-  if (!config.sandboxEnabled && wantWrite(command)) {
-    throw new Error("sandbox_disabled");
-  }
-
-  if (!controls.allow_write && wantWrite(command)) {
-    throw new Error("write_disabled");
-  }
-
-  switch (command) {
+  switch (command.command) {
     case "ping":
-      return { ok: true, pong: true, now: nowIso() };
-
+      return { ok: true, pong: true, node_id: config.nodeId, ts: nowIso() };
     case "status":
-      return {
-        ok: true,
-        node_id: config.nodeId,
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
-        sandbox_enabled: config.sandboxEnabled,
-      };
-
-    case "read_dir": {
-      const relDir = String(payload.path ?? ".");
-      return { ok: true, path: relDir, entries: await listDir(config.sandboxRoot, relDir) };
-    }
-
+      return { ok: true, node_id: config.nodeId, project_id: config.projectId, controls, sandbox: safeMetadata() };
+    case "read_dir":
+      return { ok: true, path: String(payload.path ?? "."), entries: await listDir(String(payload.path ?? ".")) };
     case "read_file_head": {
-      const relPath = String(payload.path ?? "");
-      const maxBytes = Math.min(256 * 1024, Math.max(128, Number(payload.maxBytes ?? 4096)));
-      const head = await readFileHead(config.sandboxRoot, relPath, maxBytes);
-      return { ok: true, path: relPath, bytes: head.bytes, head: head.text };
+      const result = await readFileHead(String(payload.path ?? ""), Number(payload.maxBytes ?? 4096));
+      return { ok: true, path: String(payload.path ?? ""), ...result };
     }
-
     case "shell.exec": {
-      const timeout = Number(payload.timeout ?? 120_000);
-      return await executeLocalShell(config.sandboxRoot, String(payload.script ?? ""), timeout);
+      if (!controls.allow_write) throw new Error("shell.exec bloqueado por governance allow_write=false.");
+      const result = await executeLocalShell(String(payload.script ?? ""), Number(payload.timeout ?? 30000));
+      return result as unknown as JsonObject;
     }
-
     case "fs.write": {
-      const writtenPath = await writeLocalFile(
-        config.sandboxRoot,
-        String(payload.path ?? ""),
-        String(payload.content ?? "")
-      );
-      return { ok: true, writtenPath };
+      if (!controls.allow_write) throw new Error("fs.write bloqueado por governance allow_write=false.");
+      const file = await writeLocalFile(String(payload.path ?? ""), String(payload.content ?? ""));
+      return { ok: true, path: file };
     }
-
     default:
-      throw new Error(`command_not_allowed: ${command}`);
+      throw new Error(`Comando no soportado por el agente: ${command.command}`);
   }
 }
 
 async function loop(): Promise<void> {
-  await ensureSandbox(config.sandboxRoot);
-  printBanner();
+  await ensureSandbox();
+  await emitEvent("info", "agent.start", "Agente inicializado.", { sandbox_root: rootDir() });
 
-  await emitEvent("info", "agent.boot", "Hocker Node Agent iniciado", {
-    node_id: config.nodeId,
-    project_id: config.projectId,
-    sandbox_root: config.sandboxRoot,
-  });
-
-  let lastHeartbeatAt = 0;
-
-  while (true) {
+  for (;;) {
     try {
-      await upsertNode();
-
-      const now = Date.now();
-      if (now - lastHeartbeatAt >= 60_000) {
-        lastHeartbeatAt = now;
-        await emitEvent("info", "node.heartbeat", "Heartbeat", {
-          node_id: config.nodeId,
-          uptime: process.uptime(),
-        });
-      }
-
       const controls = await getControls();
+      await upsertNode(controls.kill_switch ? "degraded" : "online");
 
       if (controls.kill_switch) {
-        console.log(
-          `${C.dim}[${new Date().toLocaleTimeString()}]${C.reset} ${C.red}Kill-switch activo. Agente en pausa.${C.reset}`
-        );
-        await new Promise((resolve) => setTimeout(resolve, config.pollMs * 2));
+        await emitEvent("warn", "agent.paused", "Kill switch activo. Loop en pausa.");
+        await new Promise((resolve) => setTimeout(resolve, config.pollMs));
         continue;
       }
 
       const queued = await fetchQueued();
 
-      for (const raw of queued) {
-        const cmd = await claimQueued(raw);
-        if (!cmd) continue;
-
-        const ts = new Date().toLocaleTimeString();
-        console.log(
-          `${C.dim}[${ts}]${C.reset} ${C.yellow}⚡ EJECUTANDO:${C.reset} ${cmd.command} ${C.dim}(${cmd.id.split("-")[0]})${C.reset}`
+      for (const command of queued) {
+        const valid = verifyCommand(
+          config.commandHmacSecret,
+          command.signature,
+          command.id,
+          command.project_id,
+          command.node_id,
+          command.command,
+          command.payload,
+          command.created_at,
+          config.maxCommandAgeMs,
         );
 
-        const controls2 = await getControls();
-
-        if (controls2.kill_switch) {
-          await cancelCmd(cmd.id, "Kill-switch activado durante ejecución.");
-          await emitEvent("warn", "command.canceled", `Cancelado por kill-switch: ${cmd.command}`, {
-            command_id: cmd.id,
-          });
+        if (!valid) {
+          await finishErr(command.id, "Firma inválida o expirada.");
+          await emitEvent("error", "command.invalid_signature", "Comando rechazado por firma inválida.", { command_id: command.id });
           continue;
         }
 
-        if (!config.sandboxEnabled && wantWrite(cmd.command)) {
-          await cancelCmd(cmd.id, "Sandbox deshabilitado.");
-          await emitEvent("warn", "command.blocked", `Bloqueado (sandbox deshabilitado): ${cmd.command}`, {
-            command_id: cmd.id,
-          });
-          continue;
-        }
-
-        if (!controls2.allow_write && wantWrite(cmd.command)) {
-          await cancelCmd(cmd.id, "Modo solo lectura activo.");
-          await emitEvent("warn", "command.blocked", `Bloqueado (modo solo lectura): ${cmd.command}`, {
-            command_id: cmd.id,
-          });
-          continue;
-        }
-
-        await emitEvent("info", "command.started", `Iniciando: ${cmd.command}`, {
-          command_id: cmd.id,
-        });
+        const locked = await markRunning(command.id);
+        if (!locked) continue;
 
         try {
-          const result = await runCommand(cmd, controls2);
-          await finishOk(cmd.id, result);
-          await emitEvent("info", "command.done", `Completado: ${cmd.command}`, {
-            command_id: cmd.id,
-          });
-          console.log(`${C.dim}[${ts}]${C.reset} ${C.green}✓ ÉXITO:${C.reset} ${cmd.command}`);
+          const result = await executeCommand(command, controls);
+          await finishDone(command.id, result);
+          await emitEvent("info", "command.done", `Comando ejecutado: ${command.command}`, { command_id: command.id });
         } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error);
-          await finishErr(cmd.id, msg);
-          await emitEvent("error", "command.error", `Error: ${cmd.command}`, {
-            command_id: cmd.id,
-            error: msg,
-          });
-          console.log(`${C.dim}[${ts}]${C.reset} ${C.red}✖ FALLO:${C.reset} ${msg}`);
+          const message = error instanceof Error ? error.message : String(error);
+          await finishErr(command.id, message);
+          await emitEvent("error", "command.error", `Error ejecutando ${command.command}`, { command_id: command.id, error: message });
         }
       }
-
-      await new Promise((resolve) => setTimeout(resolve, config.pollMs));
     } catch (error) {
-      console.error(C.red + "[LOOP ERROR]" + C.reset, error instanceof Error ? error.message : error);
-      await new Promise((resolve) => setTimeout(resolve, config.pollMs));
+      await emitEvent("error", "agent.loop_error", error instanceof Error ? error.message : String(error), {
+        trace_id: randomUUID(),
+      });
     }
+
+    await new Promise((resolve) => setTimeout(resolve, config.pollMs));
   }
 }
 
@@ -379,29 +195,23 @@ function createHealthServer(): http.Server {
         project_id: config.projectId,
         node_id: config.nodeId,
         orchestrator_configured: Boolean(config.orchestratorUrl),
-        sandbox_enabled: config.sandboxEnabled,
+        sandbox_enabled: config.sandbox.enabled,
+        sandbox_root: rootDir(),
         ts: nowIso(),
       };
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify(body));
+      res.end(JSON.stringify(body));
+      return;
     }
 
     if (req.method === "GET" && u.pathname === "/ready") {
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(
-        JSON.stringify({
-          ok: true,
-          project_id: config.projectId,
-          node_id: config.nodeId,
-          supabase_ready: true,
-          sandbox_root: config.sandboxRoot,
-          ts: nowIso(),
-        })
-      );
+      res.end(JSON.stringify({ ok: true, ts: nowIso() }));
+      return;
     }
 
     res.writeHead(404, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ ok: false, error: "not_found" }));
+    res.end(JSON.stringify({ ok: false, error: "not_found" }));
   });
 }
 
