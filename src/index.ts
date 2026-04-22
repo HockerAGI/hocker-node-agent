@@ -3,15 +3,51 @@ import { randomUUID } from "node:crypto";
 
 import { config } from "./config.js";
 import { sb } from "./supabase.js";
-import type { AgentCommand, Controls, HealthResponse, JsonObject } from "./types.js";
+import type {
+  AgentCommand,
+  Controls,
+  DirEntryInfo,
+  HealthResponse,
+  JsonObject,
+  JsonValue,
+} from "./types.js";
 import { verifyCommand } from "./lib/signature.js";
-import { ensureSandbox, executeLocalShell, listDir, readFileHead, rootDir, safeMetadata, writeLocalFile } from "./lib/sandbox.js";
+import {
+  ensureSandbox,
+  executeLocalShell,
+  listDir,
+  readFileHead,
+  rootDir,
+  safeMetadata,
+  writeLocalFile,
+} from "./lib/sandbox.js";
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
-async function emitEvent(level: "info" | "warn" | "error", type: string, message: string, data?: Record<string, unknown>): Promise<void> {
+function controlsToJson(controls: Controls): JsonObject {
+  return {
+    kill_switch: controls.kill_switch,
+    allow_write: controls.allow_write,
+  };
+}
+
+function dirEntriesToJson(entries: DirEntryInfo[]): JsonValue[] {
+  return entries.map((entry) => ({
+    name: entry.name,
+    type: entry.type,
+    size: entry.size,
+    mtimeMs: entry.mtimeMs,
+  }));
+}
+
+async function emitEvent(
+  level: "info" | "warn" | "error",
+  type: string,
+  message: string,
+  data?: Record<string, unknown>,
+): Promise<void> {
   try {
     await sb.from("events").insert({
       project_id: config.projectId,
@@ -22,7 +58,7 @@ async function emitEvent(level: "info" | "warn" | "error", type: string, message
       data: (data ?? {}) as JsonObject,
     });
   } catch {
-    // no-op
+      // no-op
   }
 }
 
@@ -90,11 +126,27 @@ async function markRunning(id: string): Promise<boolean> {
 }
 
 async function finishDone(id: string, result: JsonObject): Promise<void> {
-  await sb.from("commands").update({ status: "done", result, executed_at: nowIso(), finished_at: nowIso(), error: null }).eq("id", id);
+  await sb
+    .from("commands")
+    .update({
+      status: "done",
+      result,
+      executed_at: nowIso(),
+      finished_at: nowIso(),
+      error: null,
+    })
+    .eq("id", id);
 }
 
 async function finishErr(id: string, errorMessage: string): Promise<void> {
-  await sb.from("commands").update({ status: "error", error: errorMessage, finished_at: nowIso() }).eq("id", id);
+  await sb
+    .from("commands")
+    .update({
+      status: "error",
+      error: errorMessage,
+      finished_at: nowIso(),
+    })
+    .eq("id", id);
 }
 
 async function executeCommand(command: AgentCommand, controls: Controls): Promise<JsonObject> {
@@ -102,25 +154,80 @@ async function executeCommand(command: AgentCommand, controls: Controls): Promis
 
   switch (command.command) {
     case "ping":
-      return { ok: true, pong: true, node_id: config.nodeId, ts: nowIso() };
+      return {
+        ok: true,
+        pong: true,
+        node_id: config.nodeId,
+        ts: nowIso(),
+      };
+
     case "status":
-      return { ok: true, node_id: config.nodeId, project_id: config.projectId, controls, sandbox: safeMetadata() };
+      return {
+        ok: true,
+        node_id: config.nodeId,
+        project_id: config.projectId,
+        controls: controlsToJson(controls),
+        sandbox: safeMetadata(),
+      };
+
     case "read_dir":
-      return { ok: true, path: String(payload.path ?? "."), entries: await listDir(String(payload.path ?? ".")) };
+      return {
+        ok: true,
+        path: String(payload.path ?? "."),
+        entries: dirEntriesToJson(await listDir(String(payload.path ?? "."))),
+      };
+
     case "read_file_head": {
-      const result = await readFileHead(String(payload.path ?? ""), Number(payload.maxBytes ?? 4096));
-      return { ok: true, path: String(payload.path ?? ""), ...result };
+      const result = await readFileHead(
+        String(payload.path ?? ""),
+        Number(payload.maxBytes ?? 4096),
+      );
+
+      return {
+        ok: true,
+        path: String(payload.path ?? ""),
+        bytes: result.bytes,
+        text: result.text,
+      };
     }
+
     case "shell.exec": {
-      if (!controls.allow_write) throw new Error("shell.exec bloqueado por governance allow_write=false.");
-      const result = await executeLocalShell(String(payload.script ?? ""), Number(payload.timeout ?? 30000));
-      return result as unknown as JsonObject;
+      if (!controls.allow_write) {
+        throw new Error("shell.exec bloqueado por governance allow_write=false.");
+      }
+
+      const result = await executeLocalShell(
+        String(payload.script ?? ""),
+        Number(payload.timeout ?? 30000),
+      );
+
+      return {
+        ok: true,
+        exitCode: result.exitCode,
+        signal: result.signal ?? null,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        timedOut: result.timedOut,
+        elapsedMs: result.elapsedMs,
+      };
     }
+
     case "fs.write": {
-      if (!controls.allow_write) throw new Error("fs.write bloqueado por governance allow_write=false.");
-      const file = await writeLocalFile(String(payload.path ?? ""), String(payload.content ?? ""));
-      return { ok: true, path: file };
+      if (!controls.allow_write) {
+        throw new Error("fs.write bloqueado por governance allow_write=false.");
+      }
+
+      const file = await writeLocalFile(
+        String(payload.path ?? ""),
+        String(payload.content ?? ""),
+      );
+
+      return {
+        ok: true,
+        path: file,
+      };
     }
+
     default:
       throw new Error(`Comando no soportado por el agente: ${command.command}`);
   }
@@ -128,7 +235,9 @@ async function executeCommand(command: AgentCommand, controls: Controls): Promis
 
 async function loop(): Promise<void> {
   await ensureSandbox();
-  await emitEvent("info", "agent.start", "Agente inicializado.", { sandbox_root: rootDir() });
+  await emitEvent("info", "agent.start", "Agente inicializado.", {
+    sandbox_root: rootDir(),
+  });
 
   for (;;) {
     try {
@@ -158,7 +267,12 @@ async function loop(): Promise<void> {
 
         if (!valid) {
           await finishErr(command.id, "Firma inválida o expirada.");
-          await emitEvent("error", "command.invalid_signature", "Comando rechazado por firma inválida.", { command_id: command.id });
+          await emitEvent(
+            "error",
+            "command.invalid_signature",
+            "Comando rechazado por firma inválida.",
+            { command_id: command.id },
+          );
           continue;
         }
 
@@ -168,17 +282,30 @@ async function loop(): Promise<void> {
         try {
           const result = await executeCommand(command, controls);
           await finishDone(command.id, result);
-          await emitEvent("info", "command.done", `Comando ejecutado: ${command.command}`, { command_id: command.id });
+          await emitEvent(
+            "info",
+            "command.done",
+            `Comando ejecutado: ${command.command}`,
+            { command_id: command.id },
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await finishErr(command.id, message);
-          await emitEvent("error", "command.error", `Error ejecutando ${command.command}`, { command_id: command.id, error: message });
+          await emitEvent(
+            "error",
+            "command.error",
+            `Error ejecutando ${command.command}`,
+            { command_id: command.id, error: message },
+          );
         }
       }
     } catch (error) {
-      await emitEvent("error", "agent.loop_error", error instanceof Error ? error.message : String(error), {
-        trace_id: randomUUID(),
-      });
+      await emitEvent(
+        "error",
+        "agent.loop_error",
+        error instanceof Error ? error.message : String(error),
+        { trace_id: randomUUID() },
+      );
     }
 
     await new Promise((resolve) => setTimeout(resolve, config.pollMs));
