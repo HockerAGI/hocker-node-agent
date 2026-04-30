@@ -1,30 +1,31 @@
-# Hocker Node Agent
+# hocker-node-agent
 
-Agente ejecutor físico del ecosistema HOCKER. Consume comandos firmados desde Supabase, los valida por HMAC y los ejecuta dentro de un sandbox local.
+Agente local/físico del ecosistema HOCKER.
 
-## Variables clave
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `HOCKER_COMMAND_HMAC_SECRET`
-- `HOCKER_AGENT_KEY`
-- `NODE_ID`
-- `PROJECT_ID`
-- `PORT`
-- `POLL_MS`
-- `SANDBOX_ENABLED`
-- `SANDBOX_ROOT`
+## Rol real
 
-## Comandos soportados
-- `ping`
-- `status`
-- `read_dir`
-- `read_file_head`
-- `shell.exec`
-- `fs.write`
+Este servicio ejecuta comandos locales autorizados desde Supabase commands para PROJECT_ID=hocker-one y NODE_ID=hocker-node-1.
+
+No ejecuta comandos cloud-only.
+
+github.* -> hocker.one / cloud-hocker-one
+shell/fs/local -> hocker-node-agent / hocker-node-1
+
+## Comandos realmente soportados
+
+Lectura local:
+- ping
+- status
+- read_dir
+- read_file_head
+
+Escritura local/sandbox:
+- shell.exec
+- fs.write
 
 ## Seguridad
-- Firma HMAC obligatoria
-- Ventana máxima de edad para comandos
-- Rutas confinadas al sandbox
-- Escritura bloqueable por `system_controls.allow_write`
-- Pausa total con `system_controls.kill_switch`
+
+- Requiere firma HMAC válida.
+- Respeta MAX_COMMAND_AGE_MS.
+- shell.exec y fs.write requieren allow_write=true.
+- github.* se rechaza explícitamente porque pertenece al Cloud Action Gateway.

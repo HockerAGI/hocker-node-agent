@@ -13,6 +13,11 @@ import type {
 } from "./types.js";
 import { verifyCommand } from "./lib/signature.js";
 import {
+  isCloudOnlyCommand,
+  isLocalSupportedCommand,
+  supportedLocalCommandsSummary,
+} from "./command-policy.js";
+import {
   ensureSandbox,
   executeLocalShell,
   listDir,
@@ -152,6 +157,26 @@ async function finishErr(id: string, errorMessage: string): Promise<void> {
 async function executeCommand(command: AgentCommand, controls: Controls): Promise<JsonObject> {
   const payload = (command.payload ?? {}) as Record<string, unknown>;
 
+  if (isCloudOnlyCommand(command.command)) {
+    await emitEvent(
+      "error",
+      "command.cloud_only_rejected",
+      `Agente local rechazó comando cloud-only: ${command.command}`,
+      { command_id: command.id, command: command.command, node_id: command.node_id },
+    );
+    throw new Error(`Comando cloud-only no soportado por hocker-node-agent: ${command.command}`);
+  }
+
+  if (!isLocalSupportedCommand(command.command)) {
+    await emitEvent(
+      "error",
+      "command.unsupported_local_command",
+      `Agente local rechazó comando no soportado: ${command.command}`,
+      { command_id: command.id, command: command.command, node_id: command.node_id },
+    );
+    throw new Error(`Comando no soportado por hocker-node-agent: ${command.command}`);
+  }
+
   switch (command.command) {
     case "ping":
       return {
@@ -237,6 +262,11 @@ async function loop(): Promise<void> {
   await ensureSandbox();
   await emitEvent("info", "agent.start", "Agente inicializado.", {
     sandbox_root: rootDir(),
+    command_policy: supportedLocalCommandsSummary(),
+  });
+
+  await emitEvent("info", "command.local_policy_loaded", "Política local del agente cargada.", {
+    command_policy: supportedLocalCommandsSummary(),
   });
 
   for (;;) {
