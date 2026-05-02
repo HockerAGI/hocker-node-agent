@@ -1,0 +1,38 @@
+{
+  "node_id": "hocker-node-1",
+  "project_id": "hocker-one",
+  "mode": "physical",
+  "fallback": {
+    "enabled": true,
+    "mode": "cloud",
+    "strategy": "continue_from_syntia_memory"
+  },
+  "voice": {
+    "enabled": false,
+    "mode": "push_to_talk",
+    "wake_word": false,
+    "requires_visible_consent": true
+  },
+  "vision": {
+    "enabled": false,
+    "requires_visible_consent": true,
+    "capture_mode": "manual"
+  },
+  "ecosystem_control": {
+    "enabled": true,
+    "requires_policy": true,
+    "requires_hmac": true,
+    "write_actions_require_approval": true
+  },
+  "memory": {
+    "provider": "supabase",
+    "primary_agi": "syntia",
+    "sync_mode": "continuous"
+  },
+  "safety": {
+    "guardian_agis": ["VERTX", "JURIX", "SYNTIA", "NOVA"],
+    "no_hidden_microphone": true,
+    "no_hidden_camera": true,
+    "audit_every_action": true
+  }
+}
