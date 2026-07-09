@@ -91,15 +91,80 @@ async function upsertNode(status: "online" | "degraded" | "offline" = "online"):
       id: config.nodeId,
       project_id: config.projectId,
       name: `Node: ${config.nodeId}`,
-      type: "agent",
+      type: config.mirror.enabled ? "mirror" : "agent",
       status,
       last_seen_at: nowIso(),
-      tags: ["agent", "physical"],
-      meta: safeMetadata(),
+      tags: config.mirror.enabled ? ["agent", "physical", "mirror"] : ["agent", "physical"],
+      meta: {
+        ...safeMetadata(),
+        mirror: config.mirror.enabled,
+        primary_node_id: config.mirror.enabled ? config.mirror.primaryNodeId : undefined,
+      },
       updated_at: nowIso(),
     },
     { onConflict: "id" },
   );
+
+  // If mirror mode is enabled, also register the mirror node
+  if (config.mirror.enabled && config.mirror.mirrorNodeId) {
+    await sb.from("nodes").upsert(
+      {
+        id: config.mirror.mirrorNodeId,
+        project_id: config.projectId,
+        name: `Mirror: ${config.mirror.mirrorNodeId}`,
+        type: "mirror",
+        status,
+        last_seen_at: nowIso(),
+        tags: ["mirror"],
+        meta: {
+          primary_node_id: config.nodeId,
+          mirror_of: config.nodeId,
+          registered_at: nowIso(),
+        },
+        updated_at: nowIso(),
+      },
+      { onConflict: "id" },
+    );
+  }
+}
+
+// Track heartbeat stats for real-time monitoring
+let heartbeatStats = {
+  totalHeartbeats: 0,
+  lastHeartbeatAt: "",
+  lastPollAt: "",
+  commandsExecuted: 0,
+  commandsFailed: 0,
+  uptimeStart: Date.now(),
+};
+
+async function heartbeat(): Promise<void> {
+  heartbeatStats.totalHeartbeats++;
+  heartbeatStats.lastHeartbeatAt = nowIso();
+
+  try {
+    const controls = await getControls();
+    const status: "online" | "degraded" | "offline" = controls.kill_switch ? "degraded" : "online";
+
+    await upsertNode(status);
+
+    // Emit heartbeat event (debug level, low volume)
+    if (heartbeatStats.totalHeartbeats % 4 === 0) {
+      // Only every 4th heartbeat to reduce event volume
+      await emitEvent("info", "agent.heartbeat", "Heartbeat", {
+        total_heartbeats: heartbeatStats.totalHeartbeats,
+        commands_executed: heartbeatStats.commandsExecuted,
+        commands_failed: heartbeatStats.commandsFailed,
+        uptime_seconds: Math.floor((Date.now() - heartbeatStats.uptimeStart) / 1000),
+        kill_switch: controls.kill_switch,
+        allow_write: controls.allow_write,
+        mirror_enabled: config.mirror.enabled,
+      });
+    }
+  } catch (error) {
+    // Heartbeat failure is non-fatal — the poll loop will retry
+    await emitEvent("warn", "agent.heartbeat_error", error instanceof Error ? error.message : "heartbeat error");
+  }
 }
 
 async function fetchQueued(): Promise<AgentCommand[]> {
@@ -271,6 +336,7 @@ async function loop(): Promise<void> {
 
   for (;;) {
     try {
+      heartbeatStats.lastPollAt = nowIso();
       const controls = await getControls();
       await upsertNode(controls.kill_switch ? "degraded" : "online");
 
@@ -312,6 +378,7 @@ async function loop(): Promise<void> {
         try {
           const result = await executeCommand(command, controls);
           await finishDone(command.id, result);
+          heartbeatStats.commandsExecuted++;
           await emitEvent(
             "info",
             "command.done",
@@ -321,6 +388,7 @@ async function loop(): Promise<void> {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await finishErr(command.id, message);
+          heartbeatStats.commandsFailed++;
           await emitEvent(
             "error",
             "command.error",
@@ -367,6 +435,33 @@ function createHealthServer(): http.Server {
       return;
     }
 
+    // ── Real-time stats endpoint for Hocker ONE monitoring ──
+    if (req.method === "GET" && u.pathname === "/stats") {
+      const uptimeSeconds = Math.floor((Date.now() - heartbeatStats.uptimeStart) / 1000);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        node_id: config.nodeId,
+        project_id: config.projectId,
+        mirror_enabled: config.mirror.enabled,
+        mirror_node_id: config.mirror.mirrorNodeId || null,
+        primary_node_id: config.mirror.primaryNodeId || null,
+        heartbeat: {
+          total: heartbeatStats.totalHeartbeats,
+          last_at: heartbeatStats.lastHeartbeatAt,
+          interval_ms: config.heartbeatMs,
+        },
+        commands: {
+          executed: heartbeatStats.commandsExecuted,
+          failed: heartbeatStats.commandsFailed,
+        },
+        uptime_seconds: uptimeSeconds,
+        poll_ms: config.pollMs,
+        ts: nowIso(),
+      }));
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: false, error: "not_found" }));
   });
@@ -374,6 +469,19 @@ function createHealthServer(): http.Server {
 
 async function main(): Promise<void> {
   createHealthServer().listen(config.port, "0.0.0.0");
+
+  // Start heartbeat interval — runs independently of the poll loop
+  // This ensures the node reports presence even during long command execution
+  setInterval(() => void heartbeat(), config.heartbeatMs);
+
+  // Initial heartbeat before entering the poll loop
+  await heartbeat();
+
+  // If mirror mode is enabled, log it
+  if (config.mirror.enabled) {
+    await emitEvent("info", "agent.mirror_enabled", `Mirror mode activo. Mirror: ${config.mirror.mirrorNodeId}, Primary: ${config.mirror.primaryNodeId}`);
+  }
+
   await loop();
 }
 
