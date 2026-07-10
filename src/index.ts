@@ -81,7 +81,8 @@ async function getControls(): Promise<Controls> {
       allow_write: Boolean((data as { allow_write?: unknown } | null)?.allow_write),
     };
   } catch {
-    return { kill_switch: false, allow_write: false };
+    // Fail-safe: si no se pueden leer los controles, activar kill_switch y bloquear escrituras
+    return { kill_switch: true, allow_write: false };
   }
 }
 
