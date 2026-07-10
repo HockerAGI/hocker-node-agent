@@ -202,18 +202,21 @@ export async function executeLocalShell(
       killed?: boolean;
     };
 
+    const exitCode: number | null =
+      typeof err.code === "number"
+        ? err.code
+        : err.killed
+          ? 124
+          : null;
+    const timedOut = Boolean(err.killed);
+
     return {
-      ok: true,
-      exitCode:
-        typeof err.code === "number"
-          ? err.code
-          : err.killed
-            ? 124
-            : null,
+      ok: exitCode === 0 && !timedOut,
+      exitCode,
       signal: err.signal ?? null,
       stdout: String(err.stdout ?? ""),
       stderr: String(err.stderr ?? err.message ?? "Shell execution failed."),
-      timedOut: Boolean(err.killed),
+      timedOut,
       elapsedMs: Date.now() - start,
     };
   }

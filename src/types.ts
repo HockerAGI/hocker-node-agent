@@ -49,7 +49,7 @@ export interface FileHeadResult {
 }
 
 export interface ShellExecResult {
-  ok: true;
+  ok: boolean;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
