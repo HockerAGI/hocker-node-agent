@@ -411,7 +411,7 @@ async function loop(): Promise<void> {
 }
 
 function createHealthServer(): http.Server {
-  return http.createServer((req, res) => {
+  return http.createServer(async (req, res) => {
     const u = new URL(req.url || "/", `http://127.0.0.1:${config.port}`);
 
     if (req.method === "GET" && u.pathname === "/health") {
@@ -459,6 +459,50 @@ function createHealthServer(): http.Server {
         poll_ms: config.pollMs,
         ts: nowIso(),
       }));
+      return;
+    }
+
+    // ── Jurix audit endpoints (migrated from Fastify routes) ──
+    if (req.method === "GET" && u.pathname === "/v1/jurix/audit/logs") {
+      const project_id = String(u.searchParams.get("project_id") ?? config.projectId)
+        .trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 64) || config.projectId;
+
+      try {
+        const { data, error } = await sb
+          .from("audit_logs")
+          .select("*")
+          .eq("project_id", project_id)
+          .order("created_at", { ascending: false })
+          .limit(200);
+
+        if (error) throw new Error(error.message);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, logs: data ?? [] }));
+      } catch (err) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "audit_logs query failed" }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && u.pathname === "/v1/jurix/compliance") {
+      const project_id = String(u.searchParams.get("project_id") ?? config.projectId)
+        .trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 64) || config.projectId;
+
+      try {
+        const { data, error } = await sb
+          .from("compliance_events")
+          .select("*")
+          .eq("project_id", project_id)
+          .order("created_at", { ascending: false });
+
+        if (error) throw new Error(error.message);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, events: data ?? [] }));
+      } catch (err) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "compliance_events query failed" }));
+      }
       return;
     }
 
