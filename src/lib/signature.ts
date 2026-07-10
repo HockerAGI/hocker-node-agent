@@ -35,7 +35,7 @@ export function verifyCommandSignature(
   if (!secret || !signature) return false;
   const signedCreatedAt = normalizeSignedTimestamp(created_at);
   const ts = new Date(signedCreatedAt).getTime();
-  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > maxAgeMs) return false;
+  if (!Number.isFinite(ts) || (Date.now() - ts) > maxAgeMs || ts > Date.now() + 30000) return false;
 
   const expected = signCommand(secret, id, project_id, node_id, command, payload, created_at);
   const a = Buffer.from(expected, "hex");
