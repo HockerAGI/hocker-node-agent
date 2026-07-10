@@ -11,16 +11,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@fastify/cors": "^11.2.0",
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.5",
-    "fastify": "^5.8.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "fastify": "^5.8.5",
+    "@fastify/cors": "^11.2.0"
   },
   "engines": {
     "node": "22.x"
