@@ -436,8 +436,13 @@ function createHealthServer(): http.Server {
       return;
     }
 
-    // ── Real-time stats endpoint for Hocker ONE monitoring ──
+    // ── Real-time stats endpoint for Hocker ONE monitoring (requires auth) ──
     if (req.method === "GET" && u.pathname === "/stats") {
+      if (config.agentKey && req.headers["x-hocker-agent-key"] !== config.agentKey) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+        return;
+      }
       const uptimeSeconds = Math.floor((Date.now() - heartbeatStats.uptimeStart) / 1000);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
