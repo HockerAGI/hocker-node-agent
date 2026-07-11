@@ -512,6 +512,44 @@ function createHealthServer(): http.Server {
       return;
     }
 
+    // POST /v1/jurix/compliance/create — create a compliance event (migrated from Fastify route)
+    if (req.method === "POST" && u.pathname === "/v1/jurix/compliance/create") {
+      if (config.agentKey && req.headers["x-hocker-agent-key"] !== config.agentKey) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+        return;
+      }
+
+      try {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const raw = Buffer.concat(chunks).toString("utf8");
+        const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+
+        const projectIdRaw = String(body.project_id ?? config.projectId);
+        const project_id = projectIdRaw.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 64) || config.projectId;
+
+        const payload = {
+          project_id,
+          category: String(body.category ?? "general").trim(),
+          severity: String(body.severity ?? "info").trim(),
+          title: String(body.title ?? "Compliance event").trim(),
+          description: String(body.description ?? "").trim(),
+          evidence: Array.isArray(body.evidence) ? body.evidence : [],
+        };
+
+        const { data, error } = await sb.from("compliance_events").insert(payload).select("*").single();
+
+        if (error) throw new Error(error.message);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, event: data }));
+      } catch (err) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : "compliance_events insert failed" }));
+      }
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: false, error: "not_found" }));
   });
