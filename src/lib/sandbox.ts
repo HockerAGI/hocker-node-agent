@@ -257,12 +257,13 @@ export async function executeLocalShell(
       code?: number | string | null;
       killed?: boolean;
     };
-    const exitCode =
-      typeof err.code === "number" ? err.code : err.killed ? 124 : null;
+    const rawCode: unknown = err.code;
+    const exitCode: number | null =
+      typeof rawCode === "number" ? rawCode : err.killed ? 124 : null;
     const timedOut = Boolean(err.killed);
 
     return {
-      ok: exitCode === 0 && !timedOut,
+      ok: !timedOut && Number(exitCode) === 0,
       exitCode,
       signal: err.signal ?? null,
       stdout: String(err.stdout ?? ""),
