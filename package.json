@@ -1,6 +1,6 @@
 {
   "name": "hocker-node-agent",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Agente ejecutor seguro para HOCKER",
   "main": "dist/index.js",
   "type": "module",
@@ -8,7 +8,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",

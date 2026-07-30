@@ -2,7 +2,13 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export type JsonObject = { [key: string]: JsonValue };
 
-export type CommandStatus = "queued" | "needs_approval" | "running" | "done" | "error" | "canceled";
+export type CommandStatus =
+  | "queued"
+  | "needs_approval"
+  | "running"
+  | "done"
+  | "error"
+  | "canceled";
 
 export interface AgentCommand {
   id: string;
@@ -32,7 +38,6 @@ export interface HealthResponse {
   node_id: string;
   orchestrator_configured: boolean;
   sandbox_enabled: boolean;
-  sandbox_root: string;
   ts: string;
 }
 
