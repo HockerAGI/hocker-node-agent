@@ -7,7 +7,6 @@ import type {
   AgentCommand,
   Controls,
   DirEntryInfo,
-  HealthResponse,
   JsonObject,
   JsonValue,
 } from "./types.js";
@@ -26,9 +25,7 @@ import {
   writeLocalFile,
 } from "./lib/sandbox.js";
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
+const nowIso = () => new Date().toISOString();
 
 function controlsToJson(controls: Controls): JsonObject {
   return {
@@ -54,8 +51,10 @@ function secureEqual(received: string, expected: string): boolean {
 
 function isAuthorized(req: http.IncomingMessage): boolean {
   const header = req.headers["x-hocker-agent-key"];
-  const received = Array.isArray(header) ? header[0] : String(header || "");
-  return Boolean(received) && secureEqual(received, config.agentKey);
+  const received = Array.isArray(header)
+    ? String(header[0] ?? "")
+    : String(header ?? "");
+  return received.length > 0 && secureEqual(received, config.agentKey);
 }
 
 function writeJson(
@@ -75,7 +74,9 @@ function writeJson(
   res.end(JSON.stringify(body));
 }
 
-async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  req: http.IncomingMessage,
+): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
 
@@ -87,8 +88,7 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, u
   }
 
   if (chunks.length === 0) return {};
-  const raw = Buffer.concat(chunks).toString("utf8");
-  const parsed = JSON.parse(raw) as unknown;
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("INVALID_JSON_BODY");
   }
@@ -110,7 +110,7 @@ async function emitEvent(
   level: "info" | "warn" | "error",
   type: string,
   message: string,
-  data?: Record<string, unknown>,
+  data: Record<string, unknown> = {},
 ): Promise<void> {
   try {
     await sb.from("events").insert({
@@ -119,10 +119,10 @@ async function emitEvent(
       level,
       type,
       message,
-      data: (data ?? {}) as JsonObject,
+      data: data as JsonObject,
     });
   } catch {
-    // Telemetry must not stop the execution loop.
+    // Telemetry must never stop command processing.
   }
 }
 
@@ -135,9 +135,7 @@ async function getControls(): Promise<Controls> {
       .eq("id", "global")
       .maybeSingle();
 
-    if (error) throw new Error(error.message);
-    if (!data) return { kill_switch: true, allow_write: false };
-
+    if (error || !data) throw new Error(error?.message || "CONTROLS_NOT_FOUND");
     return {
       kill_switch: Boolean((data as { kill_switch?: unknown }).kill_switch),
       allow_write: Boolean((data as { allow_write?: unknown }).allow_write),
@@ -195,7 +193,7 @@ async function upsertNode(
   }
 }
 
-const heartbeatStats = {
+const stats = {
   totalHeartbeats: 0,
   lastHeartbeatAt: "",
   lastPollAt: "",
@@ -205,25 +203,20 @@ const heartbeatStats = {
 };
 
 async function heartbeat(): Promise<void> {
-  heartbeatStats.totalHeartbeats += 1;
-  heartbeatStats.lastHeartbeatAt = nowIso();
+  stats.totalHeartbeats += 1;
+  stats.lastHeartbeatAt = nowIso();
 
   try {
     const controls = await getControls();
-    const status = controls.kill_switch ? "degraded" : "online";
-    await upsertNode(status);
-
-    if (heartbeatStats.totalHeartbeats % 4 === 0) {
+    await upsertNode(controls.kill_switch ? "degraded" : "online");
+    if (stats.totalHeartbeats % 4 === 0) {
       await emitEvent("info", "agent.heartbeat", "Heartbeat", {
-        total_heartbeats: heartbeatStats.totalHeartbeats,
-        commands_executed: heartbeatStats.commandsExecuted,
-        commands_failed: heartbeatStats.commandsFailed,
-        uptime_seconds: Math.floor(
-          (Date.now() - heartbeatStats.uptimeStart) / 1000,
-        ),
+        total_heartbeats: stats.totalHeartbeats,
+        commands_executed: stats.commandsExecuted,
+        commands_failed: stats.commandsFailed,
+        uptime_seconds: Math.floor((Date.now() - stats.uptimeStart) / 1000),
         kill_switch: controls.kill_switch,
         allow_write: controls.allow_write,
-        mirror_enabled: config.mirror.enabled,
       });
     }
   } catch (error) {
@@ -258,7 +251,6 @@ async function markRunning(id: string): Promise<boolean> {
     .eq("status", "queued")
     .select("id")
     .maybeSingle();
-
   return !error && Boolean(data);
 }
 
@@ -275,14 +267,10 @@ async function finishDone(id: string, result: JsonObject): Promise<void> {
     .eq("id", id);
 }
 
-async function finishErr(id: string, errorMessage: string): Promise<void> {
+async function finishErr(id: string, error: string): Promise<void> {
   await sb
     .from("commands")
-    .update({
-      status: "error",
-      error: errorMessage,
-      finished_at: nowIso(),
-    })
+    .update({ status: "error", error, finished_at: nowIso() })
     .eq("id", id);
 }
 
@@ -292,42 +280,19 @@ async function executeCommand(
 ): Promise<JsonObject> {
   const payload = (command.payload ?? {}) as Record<string, unknown>;
 
-  if (isCloudOnlyCommand(command.command)) {
+  if (isCloudOnlyCommand(command.command) || !isLocalSupportedCommand(command.command)) {
     await emitEvent(
       "error",
-      "command.cloud_only_rejected",
-      `Agente local rechazó comando cloud-only: ${command.command}`,
-      {
-        command_id: command.id,
-        command: command.command,
-        node_id: command.node_id,
-      },
+      "command.rejected",
+      `Comando local rechazado: ${command.command}`,
+      { command_id: command.id, command: command.command },
     );
-    throw new Error(
-      `Comando cloud-only no soportado por hocker-node-agent: ${command.command}`,
-    );
-  }
-
-  if (!isLocalSupportedCommand(command.command)) {
-    await emitEvent(
-      "error",
-      "command.unsupported_local_command",
-      `Agente local rechazó comando no soportado: ${command.command}`,
-      {
-        command_id: command.id,
-        command: command.command,
-        node_id: command.node_id,
-      },
-    );
-    throw new Error(
-      `Comando no soportado por hocker-node-agent: ${command.command}`,
-    );
+    throw new Error(`Comando no soportado por hocker-node-agent: ${command.command}`);
   }
 
   switch (command.command) {
     case "ping":
       return { ok: true, pong: true, node_id: config.nodeId, ts: nowIso() };
-
     case "status":
       return {
         ok: true,
@@ -336,16 +301,12 @@ async function executeCommand(
         controls: controlsToJson(controls),
         sandbox: safeMetadata(),
       };
-
     case "read_dir":
       return {
         ok: true,
         path: String(payload.path ?? "."),
-        entries: dirEntriesToJson(
-          await listDir(String(payload.path ?? ".")),
-        ),
+        entries: dirEntriesToJson(await listDir(String(payload.path ?? "."))),
       };
-
     case "read_file_head": {
       const result = await readFileHead(
         String(payload.path ?? ""),
@@ -358,7 +319,6 @@ async function executeCommand(
         text: result.text,
       };
     }
-
     case "shell.exec": {
       if (!controls.allow_write) {
         throw new Error("shell.exec bloqueado por governance allow_write=false.");
@@ -370,27 +330,27 @@ async function executeCommand(
       return {
         ok: result.ok,
         exitCode: result.exitCode,
-        signal: result.signal ?? null,
+        signal: result.signal,
         stdout: result.stdout,
         stderr: result.stderr,
         timedOut: result.timedOut,
         elapsedMs: result.elapsedMs,
       };
     }
-
     case "fs.write": {
       if (!controls.allow_write) {
         throw new Error("fs.write bloqueado por governance allow_write=false.");
       }
-      const file = await writeLocalFile(
-        String(payload.path ?? ""),
-        String(payload.content ?? ""),
-      );
-      return { ok: true, path: file };
+      return {
+        ok: true,
+        path: await writeLocalFile(
+          String(payload.path ?? ""),
+          String(payload.content ?? ""),
+        ),
+      };
     }
-
     default:
-      throw new Error(`Comando no soportado por el agente: ${command.command}`);
+      throw new Error(`Comando no soportado: ${command.command}`);
   }
 }
 
@@ -403,18 +363,16 @@ async function loop(): Promise<void> {
 
   for (;;) {
     try {
-      heartbeatStats.lastPollAt = nowIso();
+      stats.lastPollAt = nowIso();
       const controls = await getControls();
       await upsertNode(controls.kill_switch ? "degraded" : "online");
 
       if (controls.kill_switch) {
-        await emitEvent("warn", "agent.paused", "Kill switch activo. Loop en pausa.");
         await new Promise((resolve) => setTimeout(resolve, config.pollMs));
         continue;
       }
 
-      const queued = await fetchQueued();
-      for (const command of queued) {
+      for (const command of await fetchQueued()) {
         const valid = verifyCommand(
           config.commandHmacSecret,
           command.signature,
@@ -429,37 +387,22 @@ async function loop(): Promise<void> {
 
         if (!valid) {
           await finishErr(command.id, "Firma inválida o expirada.");
-          await emitEvent(
-            "error",
-            "command.invalid_signature",
-            "Comando rechazado por firma inválida.",
-            { command_id: command.id },
-          );
           continue;
         }
-
         if (!(await markRunning(command.id))) continue;
 
         try {
           const result = await executeCommand(command, controls);
           await finishDone(command.id, result);
-          heartbeatStats.commandsExecuted += 1;
-          await emitEvent(
-            "info",
-            "command.done",
-            `Comando ejecutado: ${command.command}`,
-            { command_id: command.id },
-          );
+          stats.commandsExecuted += 1;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await finishErr(command.id, message);
-          heartbeatStats.commandsFailed += 1;
-          await emitEvent(
-            "error",
-            "command.error",
-            `Error ejecutando ${command.command}`,
-            { command_id: command.id, error: message },
-          );
+          stats.commandsFailed += 1;
+          await emitEvent("error", "command.error", message, {
+            command_id: command.id,
+            command: command.command,
+          });
         }
       }
     } catch (error) {
@@ -480,15 +423,14 @@ function createHealthServer(): http.Server {
     const url = new URL(req.url || "/", `http://127.0.0.1:${config.port}`);
 
     if (req.method === "GET" && url.pathname === "/health") {
-      const body: HealthResponse = {
+      writeJson(res, 200, {
         ok: true,
         project_id: config.projectId,
         node_id: config.nodeId,
         orchestrator_configured: Boolean(config.orchestratorUrl),
         sandbox_enabled: config.sandbox.enabled,
         ts: nowIso(),
-      };
-      writeJson(res, 200, body as unknown as JsonObject);
+      });
       return;
     }
 
@@ -508,20 +450,16 @@ function createHealthServer(): http.Server {
         node_id: config.nodeId,
         project_id: config.projectId,
         mirror_enabled: config.mirror.enabled,
-        mirror_node_id: config.mirror.mirrorNodeId || null,
-        primary_node_id: config.mirror.primaryNodeId || null,
         heartbeat: {
-          total: heartbeatStats.totalHeartbeats,
-          last_at: heartbeatStats.lastHeartbeatAt,
+          total: stats.totalHeartbeats,
+          last_at: stats.lastHeartbeatAt,
           interval_ms: config.heartbeatMs,
         },
         commands: {
-          executed: heartbeatStats.commandsExecuted,
-          failed: heartbeatStats.commandsFailed,
+          executed: stats.commandsExecuted,
+          failed: stats.commandsFailed,
         },
-        uptime_seconds: Math.floor(
-          (Date.now() - heartbeatStats.uptimeStart) / 1000,
-        ),
+        uptime_seconds: Math.floor((Date.now() - stats.uptimeStart) / 1000),
         poll_ms: config.pollMs,
         ts: nowIso(),
       });
@@ -537,14 +475,12 @@ function createHealthServer(): http.Server {
           .eq("project_id", projectId)
           .order("created_at", { ascending: false })
           .limit(200);
-
         if (error) throw new Error(error.message);
         writeJson(res, 200, { ok: true, logs: (data ?? []) as JsonValue[] });
       } catch (error) {
         writeJson(res, 500, {
           ok: false,
-          error:
-            error instanceof Error ? error.message : "audit_logs query failed",
+          error: error instanceof Error ? error.message : "audit query failed",
         });
       }
       return;
@@ -558,16 +494,12 @@ function createHealthServer(): http.Server {
           .select("*")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false });
-
         if (error) throw new Error(error.message);
         writeJson(res, 200, { ok: true, events: (data ?? []) as JsonValue[] });
       } catch (error) {
         writeJson(res, 500, {
           ok: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : "compliance_events query failed",
+          error: error instanceof Error ? error.message : "compliance query failed",
         });
       }
       return;
@@ -576,22 +508,19 @@ function createHealthServer(): http.Server {
     if (req.method === "POST" && url.pathname === "/v1/jurix/compliance/create") {
       try {
         const body = await readJsonBody(req);
-        const projectId = normalizeProjectId(body.project_id);
         const payload = {
-          project_id: projectId,
+          project_id: normalizeProjectId(body.project_id),
           category: String(body.category ?? "general").trim().slice(0, 80),
           severity: String(body.severity ?? "info").trim().slice(0, 32),
           title: String(body.title ?? "Compliance event").trim().slice(0, 200),
           description: String(body.description ?? "").trim().slice(0, 5000),
           evidence: Array.isArray(body.evidence) ? body.evidence.slice(0, 50) : [],
         };
-
         const { data, error } = await sb
           .from("compliance_events")
           .insert(payload)
           .select("*")
           .single();
-
         if (error) throw new Error(error.message);
         writeJson(res, 200, { ok: true, event: data as JsonValue });
       } catch (error) {
@@ -610,9 +539,7 @@ function createHealthServer(): http.Server {
 
 async function main(): Promise<void> {
   await ensureSandbox();
-
-  const server = createHealthServer();
-  server.listen(config.port, "0.0.0.0");
+  createHealthServer().listen(config.port, "0.0.0.0");
 
   if (config.shellExecEnabled) {
     await emitEvent(
