@@ -2,6 +2,8 @@ import "dotenv/config";
 import path from "node:path";
 import { z } from "zod";
 
+const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
 function read(name: string): string {
   return String(process.env[name] ?? "").trim();
 }
@@ -23,11 +25,11 @@ const Schema = z.object({
   host: z.string().min(1).default("127.0.0.1"),
   allowLan: z.boolean().default(false),
   port: z.coerce.number().int().positive().max(65535).default(8081),
-  projectId: z.string().min(1).default("hocker-one"),
-  nodeId: z.string().min(1).default("hocker-node-1"),
-  pollMs: z.coerce.number().int().positive().default(5000),
-  heartbeatMs: z.coerce.number().int().positive().default(15000),
-  maxCommandAgeMs: z.coerce.number().int().positive().default(5 * 60 * 1000),
+  projectId: z.string().regex(SAFE_ID).default("hocker-one"),
+  nodeId: z.string().regex(SAFE_ID).default("hocker-node-1"),
+  pollMs: z.coerce.number().int().min(250).max(60_000).default(5000),
+  heartbeatMs: z.coerce.number().int().min(1000).max(600_000).default(15000),
+  maxCommandAgeMs: z.coerce.number().int().min(10_000).max(3_600_000).default(5 * 60 * 1000),
   commandHmacSecret: z.string().min(24),
   agentKey: z.string().min(24),
   orchestratorUrl: z.string().url().optional().or(z.literal("")).default(""),
@@ -81,8 +83,40 @@ const parsed = Schema.parse({
 
 if (!isLoopbackHost(parsed.host) && !parsed.allowLan) {
   throw new Error(
-    "HOCKER_AGENT_HOST expone una interfaz no local. Define HOCKER_AGENT_ALLOW_LAN=true de forma explícita para habilitar acceso LAN."
+    "HOCKER_AGENT_HOST expone una interfaz no local. Define HOCKER_AGENT_ALLOW_LAN=true de forma explícita para habilitar acceso LAN.",
   );
 }
 
-export const config = parsed;
+if (parsed.commandHmacSecret === parsed.agentKey) {
+  throw new Error(
+    "HOCKER_AGENT_KEY y HOCKER_COMMAND_HMAC_SECRET deben ser secretos distintos.",
+  );
+}
+
+if (parsed.shellExecEnabled && !parsed.sandbox.enabled) {
+  throw new Error("shell.exec requiere SANDBOX_ENABLED=true.");
+}
+
+const sandboxRoot = path.resolve(parsed.sandbox.root);
+if (sandboxRoot === path.parse(sandboxRoot).root) {
+  throw new Error("SANDBOX_ROOT no puede ser la raíz del sistema de archivos.");
+}
+
+if (parsed.mirror.enabled) {
+  if (!SAFE_ID.test(parsed.mirror.primaryNodeId) || !SAFE_ID.test(parsed.mirror.mirrorNodeId)) {
+    throw new Error(
+      "MIRROR_PRIMARY_NODE_ID y MIRROR_NODE_ID son obligatorios y deben ser IDs seguros cuando MIRROR_ENABLED=true.",
+    );
+  }
+  if (parsed.mirror.mirrorNodeId === parsed.nodeId) {
+    throw new Error("MIRROR_NODE_ID debe ser distinto de NODE_ID.");
+  }
+}
+
+export const config = {
+  ...parsed,
+  sandbox: {
+    ...parsed.sandbox,
+    root: sandboxRoot,
+  },
+};
