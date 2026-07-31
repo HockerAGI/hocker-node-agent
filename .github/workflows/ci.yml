@@ -5,15 +5,19 @@ on:
   push:
     branches:
       - main
+      - fix/full-hardening-20260730
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -25,8 +29,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install
+      - name: Install reproducibly
         run: npm ci
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Typecheck
         run: npm run typecheck
