@@ -21,6 +21,9 @@
     "tsx": "^4.16.2",
     "typescript": "^5.9.0"
   },
+  "overrides": {
+    "ws": "8.21.1"
+  },
   "engines": {
     "node": "22.x"
   }
