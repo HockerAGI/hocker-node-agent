@@ -14,8 +14,15 @@ function readBoolean(name: string, fallback: boolean): boolean {
   throw new Error(`${name} debe ser true o false.`);
 }
 
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
 const Schema = z.object({
-  port: z.coerce.number().int().positive().default(8081),
+  host: z.string().min(1).default("127.0.0.1"),
+  allowLan: z.boolean().default(false),
+  port: z.coerce.number().int().positive().max(65535).default(8081),
   projectId: z.string().min(1).default("hocker-one"),
   nodeId: z.string().min(1).default("hocker-node-1"),
   pollMs: z.coerce.number().int().positive().default(5000),
@@ -41,6 +48,8 @@ const Schema = z.object({
 });
 
 const parsed = Schema.parse({
+  host: read("HOCKER_AGENT_HOST") || "127.0.0.1",
+  allowLan: readBoolean("HOCKER_AGENT_ALLOW_LAN", false),
   port: read("PORT") || 8081,
   projectId: read("PROJECT_ID") || "hocker-one",
   nodeId: read("NODE_ID") || "hocker-node-1",
@@ -69,5 +78,11 @@ const parsed = Schema.parse({
     mirrorNodeId: read("MIRROR_NODE_ID") || "",
   },
 });
+
+if (!isLoopbackHost(parsed.host) && !parsed.allowLan) {
+  throw new Error(
+    "HOCKER_AGENT_HOST expone una interfaz no local. Define HOCKER_AGENT_ALLOW_LAN=true de forma explícita para habilitar acceso LAN."
+  );
+}
 
 export const config = parsed;

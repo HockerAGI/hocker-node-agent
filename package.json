@@ -1,6 +1,6 @@
 {
   "name": "hocker-node-agent",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Agente ejecutor seguro para HOCKER",
   "main": "dist/index.js",
   "type": "module",
@@ -17,9 +17,12 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/node": "^20.14.10",
+    "@types/node": "^22.13.1",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "ws": "8.21.1"
   },
   "engines": {
     "node": "22.x"
