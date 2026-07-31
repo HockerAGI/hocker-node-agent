@@ -539,7 +539,7 @@ function createHealthServer(): http.Server {
 
 async function main(): Promise<void> {
   await ensureSandbox();
-  createHealthServer().listen(config.port, "0.0.0.0");
+  createHealthServer().listen(config.port, config.host);
 
   if (config.shellExecEnabled) {
     await emitEvent(
