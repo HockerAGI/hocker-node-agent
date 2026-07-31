@@ -32,9 +32,6 @@ jobs:
       - name: Install reproducibly
         run: npm ci
 
-      - name: Production dependency audit
-        run: npm audit --omit=dev --audit-level=high
-
       - name: Typecheck
         run: npm run typecheck
 
@@ -43,3 +40,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
