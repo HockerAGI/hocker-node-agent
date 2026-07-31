@@ -26,6 +26,12 @@ import {
 } from "./lib/sandbox.js";
 
 const nowIso = () => new Date().toISOString();
+const VALID_SEVERITIES = new Set(["info", "low", "medium", "high", "critical"]);
+
+let stopping = false;
+let healthServer: http.Server | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+let heartbeatRunning = false;
 
 function controlsToJson(controls: Controls): JsonObject {
   return {
@@ -69,6 +75,7 @@ function writeJson(
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
     ...extraHeaders,
   });
   res.end(JSON.stringify(body));
@@ -77,6 +84,14 @@ function writeJson(
 async function readJsonBody(
   req: http.IncomingMessage,
 ): Promise<Record<string, unknown>> {
+  const contentType = String(req.headers["content-type"] ?? "")
+    .split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    throw new Error("UNSUPPORTED_MEDIA_TYPE");
+  }
+
   const chunks: Buffer[] = [];
   let total = 0;
 
@@ -100,10 +115,24 @@ function normalizeProjectId(value: unknown): string {
     String(value ?? config.projectId)
       .trim()
       .toLowerCase()
-      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/[^a-z0-9._-]/g, "-")
       .replace(/-+/g, "-")
       .slice(0, 64) || config.projectId
   );
+}
+
+function scopedProjectId(value: unknown): string {
+  const requested = normalizeProjectId(value);
+  if (requested !== config.projectId) {
+    throw new Error("PROJECT_SCOPE_VIOLATION");
+  }
+  return config.projectId;
+}
+
+function boundedLimit(url: URL, fallback = 200, maximum = 200): number {
+  const parsed = Number(url.searchParams.get("limit") ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), 1), maximum);
 }
 
 async function emitEvent(
@@ -112,21 +141,26 @@ async function emitEvent(
   message: string,
   data: Record<string, unknown> = {},
 ): Promise<void> {
-  try {
-    await sb.from("events").insert({
-      project_id: config.projectId,
-      node_id: config.nodeId,
-      level,
-      type,
-      message,
-      data: data as JsonObject,
-    });
-  } catch {
-    // Telemetry must never stop command processing.
+  const { error } = await sb.from("events").insert({
+    project_id: config.projectId,
+    node_id: config.nodeId,
+    level,
+    type,
+    message: message.slice(0, 2000),
+    data: data as JsonObject,
+  });
+
+  if (error) {
+    console.error(`[hocker-node-agent] telemetry failed: ${error.message}`);
   }
 }
 
-async function getControls(): Promise<Controls> {
+type ControlsState = {
+  controls: Controls;
+  available: boolean;
+};
+
+async function getControlsState(): Promise<ControlsState> {
   try {
     const { data, error } = await sb
       .from("system_controls")
@@ -137,18 +171,28 @@ async function getControls(): Promise<Controls> {
 
     if (error || !data) throw new Error(error?.message || "CONTROLS_NOT_FOUND");
     return {
-      kill_switch: Boolean((data as { kill_switch?: unknown }).kill_switch),
-      allow_write: Boolean((data as { allow_write?: unknown }).allow_write),
+      available: true,
+      controls: {
+        kill_switch: Boolean((data as { kill_switch?: unknown }).kill_switch),
+        allow_write: Boolean((data as { allow_write?: unknown }).allow_write),
+      },
     };
   } catch {
-    return { kill_switch: true, allow_write: false };
+    return {
+      available: false,
+      controls: { kill_switch: true, allow_write: false },
+    };
   }
+}
+
+async function getControls(): Promise<Controls> {
+  return (await getControlsState()).controls;
 }
 
 async function upsertNode(
   status: "online" | "degraded" | "offline" = "online",
 ): Promise<void> {
-  await sb.from("nodes").upsert(
+  const { error } = await sb.from("nodes").upsert(
     {
       id: config.nodeId,
       project_id: config.projectId,
@@ -171,8 +215,10 @@ async function upsertNode(
     { onConflict: "id" },
   );
 
+  if (error) throw new Error(error.message);
+
   if (config.mirror.enabled && config.mirror.mirrorNodeId) {
-    await sb.from("nodes").upsert(
+    const { error: mirrorError } = await sb.from("nodes").upsert(
       {
         id: config.mirror.mirrorNodeId,
         project_id: config.projectId,
@@ -190,6 +236,7 @@ async function upsertNode(
       },
       { onConflict: "id" },
     );
+    if (mirrorError) throw new Error(mirrorError.message);
   }
 }
 
@@ -203,20 +250,25 @@ const stats = {
 };
 
 async function heartbeat(): Promise<void> {
+  if (heartbeatRunning || stopping) return;
+  heartbeatRunning = true;
   stats.totalHeartbeats += 1;
   stats.lastHeartbeatAt = nowIso();
 
   try {
-    const controls = await getControls();
-    await upsertNode(controls.kill_switch ? "degraded" : "online");
+    const state = await getControlsState();
+    await upsertNode(
+      !state.available || state.controls.kill_switch ? "degraded" : "online",
+    );
     if (stats.totalHeartbeats % 4 === 0) {
       await emitEvent("info", "agent.heartbeat", "Heartbeat", {
         total_heartbeats: stats.totalHeartbeats,
         commands_executed: stats.commandsExecuted,
         commands_failed: stats.commandsFailed,
         uptime_seconds: Math.floor((Date.now() - stats.uptimeStart) / 1000),
-        kill_switch: controls.kill_switch,
-        allow_write: controls.allow_write,
+        controls_available: state.available,
+        kill_switch: state.controls.kill_switch,
+        allow_write: state.controls.allow_write,
       });
     }
   } catch (error) {
@@ -225,6 +277,8 @@ async function heartbeat(): Promise<void> {
       "agent.heartbeat_error",
       error instanceof Error ? error.message : "heartbeat error",
     );
+  } finally {
+    heartbeatRunning = false;
   }
 }
 
@@ -243,41 +297,69 @@ async function fetchQueued(): Promise<AgentCommand[]> {
   return (data ?? []) as AgentCommand[];
 }
 
-async function markRunning(id: string): Promise<boolean> {
-  const { data, error } = await sb
+async function updateCommandState(
+  command: AgentCommand,
+  expectedStatus: "queued" | "running",
+  patch: JsonObject,
+): Promise<boolean> {
+  let query = sb
     .from("commands")
-    .update({ status: "running", started_at: nowIso() })
-    .eq("id", id)
-    .eq("status", "queued")
-    .select("id")
-    .maybeSingle();
-  return !error && Boolean(data);
+    .update(patch)
+    .eq("id", command.id)
+    .eq("project_id", config.projectId)
+    .eq("node_id", config.nodeId)
+    .eq("signature", command.signature)
+    .eq("status", expectedStatus);
+
+  if (expectedStatus === "queued") {
+    query = query.eq("needs_approval", false);
+  }
+
+  const { data, error } = await query.select("id").maybeSingle();
+  if (error) throw new Error(error.message);
+  return Boolean(data);
 }
 
-async function finishDone(id: string, result: JsonObject): Promise<void> {
-  await sb
-    .from("commands")
-    .update({
-      status: "done",
-      result,
-      executed_at: nowIso(),
-      finished_at: nowIso(),
-      error: null,
-    })
-    .eq("id", id);
+async function markRunning(command: AgentCommand): Promise<boolean> {
+  return updateCommandState(command, "queued", {
+    status: "running",
+    started_at: nowIso(),
+  });
 }
 
-async function finishErr(id: string, error: string): Promise<void> {
-  await sb
-    .from("commands")
-    .update({ status: "error", error, finished_at: nowIso() })
-    .eq("id", id);
+async function finishDone(command: AgentCommand, result: JsonObject): Promise<void> {
+  const finishedAt = nowIso();
+  const updated = await updateCommandState(command, "running", {
+    status: "done",
+    result,
+    executed_at: finishedAt,
+    finished_at: finishedAt,
+    error: null,
+  });
+  if (!updated) throw new Error("COMMAND_STATE_CONFLICT_DONE");
+}
+
+async function finishErr(
+  command: AgentCommand,
+  error: string,
+  expectedStatus: "queued" | "running",
+): Promise<void> {
+  const updated = await updateCommandState(command, expectedStatus, {
+    status: "error",
+    error: error.slice(0, 2000),
+    finished_at: nowIso(),
+  });
+  if (!updated) throw new Error("COMMAND_STATE_CONFLICT_ERROR");
 }
 
 async function executeCommand(
   command: AgentCommand,
   controls: Controls,
 ): Promise<JsonObject> {
+  if (command.project_id !== config.projectId || command.node_id !== config.nodeId) {
+    throw new Error("COMMAND_SCOPE_VIOLATION");
+  }
+
   const payload = (command.payload ?? {}) as Record<string, unknown>;
 
   if (isCloudOnlyCommand(command.command) || !isLocalSupportedCommand(command.command)) {
@@ -354,6 +436,8 @@ async function executeCommand(
   }
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function loop(): Promise<void> {
   await ensureSandbox();
   await emitEvent("info", "agent.start", "Agente inicializado.", {
@@ -361,18 +445,22 @@ async function loop(): Promise<void> {
     shell_exec_enabled: config.shellExecEnabled,
   });
 
-  for (;;) {
+  while (!stopping) {
     try {
       stats.lastPollAt = nowIso();
-      const controls = await getControls();
-      await upsertNode(controls.kill_switch ? "degraded" : "online");
+      const state = await getControlsState();
+      await upsertNode(
+        !state.available || state.controls.kill_switch ? "degraded" : "online",
+      );
 
-      if (controls.kill_switch) {
-        await new Promise((resolve) => setTimeout(resolve, config.pollMs));
+      if (!state.available || state.controls.kill_switch) {
+        await sleep(config.pollMs);
         continue;
       }
 
       for (const command of await fetchQueued()) {
+        if (stopping) break;
+
         const valid = verifyCommand(
           config.commandHmacSecret,
           command.signature,
@@ -386,18 +474,38 @@ async function loop(): Promise<void> {
         );
 
         if (!valid) {
-          await finishErr(command.id, "Firma inválida o expirada.");
+          try {
+            await finishErr(command, "Firma inválida o expirada.", "queued");
+          } catch (error) {
+            await emitEvent(
+              "error",
+              "command.state_error",
+              error instanceof Error ? error.message : "state error",
+              { command_id: command.id },
+            );
+          }
+          stats.commandsFailed += 1;
           continue;
         }
-        if (!(await markRunning(command.id))) continue;
+
+        if (!(await markRunning(command))) continue;
 
         try {
-          const result = await executeCommand(command, controls);
-          await finishDone(command.id, result);
+          const result = await executeCommand(command, state.controls);
+          await finishDone(command, result);
           stats.commandsExecuted += 1;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          await finishErr(command.id, message);
+          try {
+            await finishErr(command, message, "running");
+          } catch (stateError) {
+            await emitEvent(
+              "error",
+              "command.state_error",
+              stateError instanceof Error ? stateError.message : "state error",
+              { command_id: command.id },
+            );
+          }
           stats.commandsFailed += 1;
           await emitEvent("error", "command.error", message, {
             command_id: command.id,
@@ -414,132 +522,204 @@ async function loop(): Promise<void> {
       );
     }
 
-    await new Promise((resolve) => setTimeout(resolve, config.pollMs));
+    if (!stopping) await sleep(config.pollMs);
   }
 }
 
 function createHealthServer(): http.Server {
-  return http.createServer(async (req, res) => {
-    const url = new URL(req.url || "/", `http://127.0.0.1:${config.port}`);
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || "/", `http://127.0.0.1:${config.port}`);
 
-    if (req.method === "GET" && url.pathname === "/health") {
-      writeJson(res, 200, {
-        ok: true,
-        project_id: config.projectId,
-        node_id: config.nodeId,
-        orchestrator_configured: Boolean(config.orchestratorUrl),
-        sandbox_enabled: config.sandbox.enabled,
-        ts: nowIso(),
-      });
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/ready") {
-      writeJson(res, 200, { ok: true, ts: nowIso() });
-      return;
-    }
-
-    if (!isAuthorized(req)) {
-      writeJson(res, 401, { ok: false, error: "unauthorized" });
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/stats") {
-      writeJson(res, 200, {
-        ok: true,
-        node_id: config.nodeId,
-        project_id: config.projectId,
-        mirror_enabled: config.mirror.enabled,
-        heartbeat: {
-          total: stats.totalHeartbeats,
-          last_at: stats.lastHeartbeatAt,
-          interval_ms: config.heartbeatMs,
-        },
-        commands: {
-          executed: stats.commandsExecuted,
-          failed: stats.commandsFailed,
-        },
-        uptime_seconds: Math.floor((Date.now() - stats.uptimeStart) / 1000),
-        poll_ms: config.pollMs,
-        ts: nowIso(),
-      });
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/v1/jurix/audit/logs") {
-      try {
-        const projectId = normalizeProjectId(url.searchParams.get("project_id"));
-        const { data, error } = await sb
-          .from("audit_logs")
-          .select("*")
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: false })
-          .limit(200);
-        if (error) throw new Error(error.message);
-        writeJson(res, 200, { ok: true, logs: (data ?? []) as JsonValue[] });
-      } catch (error) {
-        writeJson(res, 500, {
-          ok: false,
-          error: error instanceof Error ? error.message : "audit query failed",
+      if (req.method === "GET" && url.pathname === "/health") {
+        writeJson(res, 200, {
+          ok: true,
+          service: "hocker-node-agent",
+          ts: nowIso(),
         });
+        return;
       }
-      return;
-    }
 
-    if (req.method === "GET" && url.pathname === "/v1/jurix/compliance") {
-      try {
-        const projectId = normalizeProjectId(url.searchParams.get("project_id"));
-        const { data, error } = await sb
-          .from("compliance_events")
-          .select("*")
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: false });
-        if (error) throw new Error(error.message);
-        writeJson(res, 200, { ok: true, events: (data ?? []) as JsonValue[] });
-      } catch (error) {
-        writeJson(res, 500, {
-          ok: false,
-          error: error instanceof Error ? error.message : "compliance query failed",
+      if (req.method === "GET" && url.pathname === "/ready") {
+        const state = await getControlsState();
+        const ready = state.available && !state.controls.kill_switch;
+        writeJson(res, ready ? 200 : 503, {
+          ok: ready,
+          status: !state.available
+            ? "dependency_unavailable"
+            : state.controls.kill_switch
+              ? "paused"
+              : "ready",
+          ts: nowIso(),
         });
+        return;
       }
-      return;
-    }
 
-    if (req.method === "POST" && url.pathname === "/v1/jurix/compliance/create") {
-      try {
-        const body = await readJsonBody(req);
-        const payload = {
-          project_id: normalizeProjectId(body.project_id),
-          category: String(body.category ?? "general").trim().slice(0, 80),
-          severity: String(body.severity ?? "info").trim().slice(0, 32),
-          title: String(body.title ?? "Compliance event").trim().slice(0, 200),
-          description: String(body.description ?? "").trim().slice(0, 5000),
-          evidence: Array.isArray(body.evidence) ? body.evidence.slice(0, 50) : [],
-        };
-        const { data, error } = await sb
-          .from("compliance_events")
-          .insert(payload)
-          .select("*")
-          .single();
-        if (error) throw new Error(error.message);
-        writeJson(res, 200, { ok: true, event: data as JsonValue });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "insert failed";
-        writeJson(res, message === "PAYLOAD_TOO_LARGE" ? 413 : 400, {
-          ok: false,
-          error: message,
+      if (!isAuthorized(req)) {
+        writeJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/stats") {
+        writeJson(res, 200, {
+          ok: true,
+          node_id: config.nodeId,
+          project_id: config.projectId,
+          mirror_enabled: config.mirror.enabled,
+          heartbeat: {
+            total: stats.totalHeartbeats,
+            last_at: stats.lastHeartbeatAt,
+            interval_ms: config.heartbeatMs,
+          },
+          commands: {
+            executed: stats.commandsExecuted,
+            failed: stats.commandsFailed,
+          },
+          uptime_seconds: Math.floor((Date.now() - stats.uptimeStart) / 1000),
+          poll_ms: config.pollMs,
+          ts: nowIso(),
         });
+        return;
       }
-      return;
-    }
 
-    writeJson(res, 404, { ok: false, error: "not_found" });
+      if (req.method === "GET" && url.pathname === "/v1/jurix/audit/logs") {
+        try {
+          const projectId = scopedProjectId(url.searchParams.get("project_id"));
+          const { data, error } = await sb
+            .from("audit_logs")
+            .select("*")
+            .eq("project_id", projectId)
+            .order("created_at", { ascending: false })
+            .limit(boundedLimit(url));
+          if (error) throw new Error(error.message);
+          writeJson(res, 200, { ok: true, logs: (data ?? []) as JsonValue[] });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "audit query failed";
+          if (message === "PROJECT_SCOPE_VIOLATION") {
+            writeJson(res, 403, { ok: false, error: "project_scope_violation" });
+          } else {
+            await emitEvent("error", "jurix.audit_query_error", message);
+            writeJson(res, 500, { ok: false, error: "audit_query_failed" });
+          }
+        }
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/v1/jurix/compliance") {
+        try {
+          const projectId = scopedProjectId(url.searchParams.get("project_id"));
+          const { data, error } = await sb
+            .from("compliance_events")
+            .select("*")
+            .eq("project_id", projectId)
+            .order("created_at", { ascending: false })
+            .limit(boundedLimit(url));
+          if (error) throw new Error(error.message);
+          writeJson(res, 200, { ok: true, events: (data ?? []) as JsonValue[] });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "compliance query failed";
+          if (message === "PROJECT_SCOPE_VIOLATION") {
+            writeJson(res, 403, { ok: false, error: "project_scope_violation" });
+          } else {
+            await emitEvent("error", "jurix.compliance_query_error", message);
+            writeJson(res, 500, { ok: false, error: "compliance_query_failed" });
+          }
+        }
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/v1/jurix/compliance/create") {
+        try {
+          const body = await readJsonBody(req);
+          const severity = String(body.severity ?? "info").trim().toLowerCase();
+          if (!VALID_SEVERITIES.has(severity)) throw new Error("INVALID_SEVERITY");
+
+          const title = String(body.title ?? "").trim().slice(0, 200);
+          if (!title) throw new Error("TITLE_REQUIRED");
+
+          const payload = {
+            project_id: scopedProjectId(body.project_id),
+            category: String(body.category ?? "general").trim().slice(0, 80) || "general",
+            severity,
+            title,
+            description: String(body.description ?? "").trim().slice(0, 5000),
+            evidence: Array.isArray(body.evidence) ? body.evidence.slice(0, 50) : [],
+          };
+          const { data, error } = await sb
+            .from("compliance_events")
+            .insert(payload)
+            .select("*")
+            .single();
+          if (error) throw new Error(error.message);
+          writeJson(res, 201, { ok: true, event: data as JsonValue });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "insert failed";
+          const status = message === "PAYLOAD_TOO_LARGE"
+            ? 413
+            : message === "UNSUPPORTED_MEDIA_TYPE"
+              ? 415
+              : message === "PROJECT_SCOPE_VIOLATION"
+                ? 403
+                : 400;
+          writeJson(res, status, {
+            ok: false,
+            error: message.toLowerCase(),
+          });
+        }
+        return;
+      }
+
+      writeJson(res, 404, { ok: false, error: "not_found" });
+    } catch (error) {
+      await emitEvent(
+        "error",
+        "agent.http_error",
+        error instanceof Error ? error.message : "http error",
+      );
+      if (!res.headersSent) {
+        writeJson(res, 500, { ok: false, error: "internal_error" });
+      } else {
+        res.destroy();
+      }
+    }
   });
+
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
+  return server;
+}
+
+async function listen(server: http.Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(config.port, config.host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+async function shutdown(signal: string): Promise<void> {
+  if (stopping) return;
+  stopping = true;
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+
+  await emitEvent("info", "agent.stop", `Agente detenido por ${signal}.`).catch(() => undefined);
+  await upsertNode("offline").catch(() => undefined);
+
+  const server = healthServer;
+  if (server) {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
 
 async function main(): Promise<void> {
   await ensureSandbox();
-  createHealthServer().listen(config.port, config.host);
+  healthServer = createHealthServer();
+  await listen(healthServer);
 
   if (config.shellExecEnabled) {
     await emitEvent(
@@ -549,7 +729,7 @@ async function main(): Promise<void> {
     );
   }
 
-  setInterval(() => void heartbeat(), config.heartbeatMs);
+  heartbeatTimer = setInterval(() => void heartbeat(), config.heartbeatMs);
   await heartbeat();
 
   if (config.mirror.enabled) {
@@ -563,4 +743,15 @@ async function main(): Promise<void> {
   await loop();
 }
 
-void main();
+process.once("SIGINT", () => {
+  void shutdown("SIGINT").finally(() => process.exit(0));
+});
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM").finally(() => process.exit(0));
+});
+
+void main().catch((error) => {
+  console.error("[hocker-node-agent] startup failed");
+  console.error(error);
+  process.exitCode = 1;
+});
