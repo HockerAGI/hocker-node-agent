@@ -17,6 +17,10 @@ const DEFAULT_SAFE_PATH =
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const NO_FOLLOW =
   typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+const MAX_DIR_ENTRIES = 1000;
+const MAX_WRITE_BYTES = 1024 * 1024;
+const MAX_SHELL_SCRIPT_BYTES = 16 * 1024;
+const MAX_SHELL_BUFFER_BYTES = 256 * 1024;
 
 export function rootDir(): string {
   return path.resolve(config.sandbox.root);
@@ -94,7 +98,7 @@ function clampTimeout(timeout: number): number {
 
 function safeChildEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    PATH: String(process.env.PATH || DEFAULT_SAFE_PATH),
+    PATH: String(process.env.HOCKER_SHELL_PATH || DEFAULT_SAFE_PATH),
     HOME: rootDir(),
     TMPDIR: tmpDir(),
     LANG: String(process.env.LANG || "C.UTF-8"),
@@ -127,7 +131,9 @@ export async function listDir(relPath: string): Promise<DirEntryInfo[]> {
     throw new Error("La ruta no es un directorio válido.");
   }
 
-  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const entries = (await fs.readdir(dir, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .slice(0, MAX_DIR_ENTRIES);
   const result: DirEntryInfo[] = [];
 
   for (const entry of entries) {
@@ -180,6 +186,11 @@ export async function writeLocalFile(
   content: string,
 ): Promise<string> {
   assertSandboxEnabled();
+  const cleanContent = String(content ?? "");
+  if (Buffer.byteLength(cleanContent, "utf8") > MAX_WRITE_BYTES) {
+    throw new Error(`Contenido excede el límite de ${MAX_WRITE_BYTES} bytes.`);
+  }
+
   const lexical = lexicalPath(relPath);
   const root = await canonicalRoot();
 
@@ -205,7 +216,7 @@ export async function writeLocalFile(
   const handle = await fs.open(file, flags, 0o600);
 
   try {
-    await handle.writeFile(String(content ?? ""), "utf8");
+    await handle.writeFile(cleanContent, "utf8");
   } finally {
     await handle.close();
   }
@@ -228,6 +239,9 @@ export async function executeLocalShell(
   if (!cleanScript.trim() || cleanScript.includes("\0")) {
     throw new Error("Script inválido.");
   }
+  if (Buffer.byteLength(cleanScript, "utf8") > MAX_SHELL_SCRIPT_BYTES) {
+    throw new Error(`Script excede el límite de ${MAX_SHELL_SCRIPT_BYTES} bytes.`);
+  }
 
   await ensureSandbox();
   const start = Date.now();
@@ -236,7 +250,7 @@ export async function executeLocalShell(
     const { stdout, stderr } = await execFileAsync("/bin/sh", ["-lc", cleanScript], {
       cwd: await canonicalRoot(),
       timeout: clampTimeout(timeout),
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: MAX_SHELL_BUFFER_BYTES,
       env: safeChildEnv(),
     });
 
@@ -266,8 +280,11 @@ export async function executeLocalShell(
       ok: !timedOut && Number(exitCode) === 0,
       exitCode,
       signal: err.signal ?? null,
-      stdout: String(err.stdout ?? ""),
-      stderr: String(err.stderr ?? err.message ?? "Shell execution failed."),
+      stdout: String(err.stdout ?? "").slice(0, MAX_SHELL_BUFFER_BYTES),
+      stderr: String(err.stderr ?? err.message ?? "Shell execution failed.").slice(
+        0,
+        MAX_SHELL_BUFFER_BYTES,
+      ),
       timedOut,
       elapsedMs: Date.now() - start,
     };
