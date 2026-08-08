@@ -24,6 +24,7 @@ test("workflow dependencies are immutable and checkout credentials are not persi
       const match = line.match(/^\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/);
       if (!match) continue;
       const ref = match[1];
+      if (!ref) continue;
       if (ref.startsWith("./") || ref.startsWith("docker://")) continue;
       if (!/@[0-9a-f]{40}$/i.test(ref)) violations.push(`${file}:${index + 1}: ${ref}`);
     }
