@@ -10,6 +10,18 @@ test("repository security controls exist", async () => {
   }
 });
 
+test("the default test command covers root-level and nested test files", async () => {
+  const packageJson = JSON.parse(await read("package.json")) as {
+    scripts?: { test?: string };
+  };
+
+  assert.equal(
+    packageJson.scripts?.test,
+    "tsx --test src/*.test.ts src/**/*.test.ts",
+    "npm test must execute every current test file under src",
+  );
+});
+
 test("workflow dependencies are immutable and checkout credentials are not persisted", async () => {
   const dir = new URL("../.github/workflows/", import.meta.url);
   const files = (await readdir(dir)).filter((name) => /\.ya?ml$/i.test(name));
