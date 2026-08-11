@@ -19,7 +19,7 @@
   "devDependencies": {
     "@types/node": "^22.13.1",
     "tsx": "^4.23.11",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "esbuild": "0.28.1",
