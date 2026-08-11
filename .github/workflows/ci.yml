@@ -42,6 +42,29 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Compiled runtime smoke
+        env:
+          HOCKER_AGENT_HOST: 127.0.0.1
+          HOCKER_AGENT_ALLOW_LAN: "false"
+          PORT: "8081"
+          PROJECT_ID: hocker-one
+          NODE_ID: hocker-node-ci
+          POLL_MS: "5000"
+          HEARTBEAT_MS: "15000"
+          MAX_COMMAND_AGE_MS: "300000"
+          HOCKER_COMMAND_HMAC_SECRET: command-signing-secret-ci-1234567890
+          HOCKER_AGENT_KEY: agent-api-secret-ci-0987654321
+          ORCHESTRATOR_URL: ""
+          HOCKER_ALLOW_UNSANDBOXED_SHELL: "false"
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: service-role-key-ci-1234567890
+          SANDBOX_ENABLED: "true"
+          SANDBOX_ROOT: ./sandbox-ci
+          MIRROR_ENABLED: "false"
+          MIRROR_PRIMARY_NODE_ID: ""
+          MIRROR_NODE_ID: ""
+        run: node --input-type=module --eval "await import('./dist/config.js')"
+
       - name: Production dependency audit
         run: npm audit --omit=dev --audit-level=high
 
