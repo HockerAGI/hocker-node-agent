@@ -25,3 +25,11 @@ test("Node Agent separates API and command-signing secrets", async () => {
   assert.match(config, /deben ser secretos distintos/);
   assert.match(config, /SANDBOX_ROOT no puede ser la raíz/);
 });
+
+test("Node Agent makes dotenv 17 bootstrap logging explicitly quiet", async () => {
+  const config = await read("src/config.ts");
+
+  assert.match(config, /import dotenv from "dotenv"/);
+  assert.match(config, /dotenv\.config\(\{ quiet: true \}\)/);
+  assert.doesNotMatch(config, /import "dotenv\/config"/);
+});

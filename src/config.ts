@@ -1,6 +1,8 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import path from "node:path";
 import { z } from "zod";
+
+dotenv.config({ quiet: true });
 
 const SAFE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
