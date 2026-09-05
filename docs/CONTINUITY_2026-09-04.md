@@ -5,3 +5,8 @@
 - Security boundary remains HMAC + project/node scope + allowlist + cloud-action rejection + sandbox/non-root + allow_write + telemetry.
 - Current physical heartbeat evidence is stale; do not claim the node is live without a fresh heartbeat.
 - The agent is ready for the final manual batch once software-side gates are closed.
+
+
+## Post-merge evidence cut 2026-09-05
+
+Latest main has changed. Re-query main/CI/deployment/runtime evidence before the next material mutation; repository state alone never proves liveness.
