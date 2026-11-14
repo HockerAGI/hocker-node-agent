@@ -192,7 +192,8 @@ async function getControls(): Promise<Controls> {
 
 async function upsertNode(
   status: "online" | "degraded" | "offline" = "online",
-): Promise<void> {
+): Promise<string> {
+  const persistedAt = nowIso();
   const { error } = await sb.from("nodes").upsert(
     {
       id: config.nodeId,
@@ -200,7 +201,7 @@ async function upsertNode(
       name: `Node: ${config.nodeId}`,
       type: config.mirror.enabled ? "mirror" : "agent",
       status,
-      last_seen_at: nowIso(),
+      last_seen_at: persistedAt,
       tags: config.mirror.enabled
         ? ["agent", "physical", "mirror"]
         : ["agent", "physical"],
@@ -226,7 +227,7 @@ async function upsertNode(
         name: `Mirror: ${config.mirror.mirrorNodeId}`,
         type: "mirror",
         status,
-        last_seen_at: nowIso(),
+        last_seen_at: persistedAt,
         tags: ["mirror"],
         meta: {
           primary_node_id: config.nodeId,
@@ -239,6 +240,7 @@ async function upsertNode(
     );
     if (mirrorError) throw new Error(mirrorError.message);
   }
+  return persistedAt;
 }
 
 const stats = {
@@ -259,11 +261,11 @@ async function heartbeat(): Promise<void> {
 
   try {
     const state = await getControlsState();
-    await upsertNode(
+    const persistedAt = await upsertNode(
       !state.available || state.controls.kill_switch ? "degraded" : "online",
     );
-    // Only a successful database write is liveness evidence.
-    stats.lastSuccessfulHeartbeatAt = nowIso();
+    // Record the timestamp actually persisted, NOT the completion time.
+    stats.lastSuccessfulHeartbeatAt = persistedAt;
     if (stats.totalHeartbeats % 4 === 0) {
       await emitEvent("info", "agent.heartbeat", "Heartbeat", {
         total_heartbeats: stats.totalHeartbeats,
