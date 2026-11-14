@@ -2,6 +2,7 @@ import http from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { config } from "./config.js";
+import { hasFreshNodeHeartbeat } from "./heartbeat-readiness.js";
 import { sb } from "./supabase.js";
 import type {
   AgentCommand,
@@ -243,6 +244,7 @@ async function upsertNode(
 const stats = {
   totalHeartbeats: 0,
   lastHeartbeatAt: "",
+  lastSuccessfulHeartbeatAt: "",
   lastPollAt: "",
   commandsExecuted: 0,
   commandsFailed: 0,
@@ -260,6 +262,8 @@ async function heartbeat(): Promise<void> {
     await upsertNode(
       !state.available || state.controls.kill_switch ? "degraded" : "online",
     );
+    // Only a successful database write is liveness evidence.
+    stats.lastSuccessfulHeartbeatAt = nowIso();
     if (stats.totalHeartbeats % 4 === 0) {
       await emitEvent("info", "agent.heartbeat", "Heartbeat", {
         total_heartbeats: stats.totalHeartbeats,
@@ -542,14 +546,19 @@ function createHealthServer(): http.Server {
 
       if (req.method === "GET" && url.pathname === "/ready") {
         const state = await getControlsState();
-        const ready = state.available && !state.controls.kill_switch;
+        const freshHeartbeat = hasFreshNodeHeartbeat(
+          stats.lastSuccessfulHeartbeatAt || null,
+          config.heartbeatMs,
+        );
+        const ready = state.available && !state.controls.kill_switch && freshHeartbeat;
         writeJson(res, ready ? 200 : 503, {
           ok: ready,
           status: !state.available
             ? "dependency_unavailable"
             : state.controls.kill_switch
               ? "paused"
-              : "ready",
+              : !freshHeartbeat ? "heartbeat_not_fresh" : "ready",
+          heartbeat_fresh: freshHeartbeat,
           ts: nowIso(),
         });
         return;
@@ -569,6 +578,10 @@ function createHealthServer(): http.Server {
           heartbeat: {
             total: stats.totalHeartbeats,
             last_at: stats.lastHeartbeatAt,
+            last_successful_at: stats.lastSuccessfulHeartbeatAt || null,
+            fresh: hasFreshNodeHeartbeat(
+              stats.lastSuccessfulHeartbeatAt || null, config.heartbeatMs,
+            ),
             interval_ms: config.heartbeatMs,
           },
           commands: {
