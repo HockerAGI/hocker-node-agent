@@ -94,7 +94,7 @@ npm start
 | `MAX_COMMAND_AGE_MS` | Edad máxima de comando aceptado | `300000` (5 min) |
 | `SANDBOX_ENABLED` | Habilitar sandbox de filesystem | `true` |
 | `SANDBOX_ROOT` | Directorio raíz del sandbox | `./sandbox` |
-| `HOCKER_AGENT_KEY` | Key para autenticar endpoint `/stats` | (vacío = sin auth) |
+| `HOCKER_AGENT_KEY` | Obligatoria (mínimo 24 caracteres), autentica rutas excepto `/health` y `/ready` | (requerido) |
 | `ORCHESTRATOR_URL` | URL del orquestador (opcional) | (vacío) |
 | `MIRROR_ENABLED` | Habilitar modo mirror | `false` |
 | `MIRROR_NODE_ID` | ID del nodo espejo | (vacío) |
@@ -130,7 +130,28 @@ npm start
 - **Kill switch**: Si `system_controls.kill_switch=true`, el agente pausa la ejecución. Si hay error al leer controles, fail-safe = kill_switch activado.
 - **Allow write**: `shell.exec` y `fs.write` requieren `allow_write=true` en `system_controls`.
 - **Sandbox**: Filesystem aislado bajo `SANDBOX_ROOT`. Prevención de path traversal (sandbox escape).
-- **Auth en /stats**: El endpoint `/stats` requiere header `x-hocker-agent-key` cuando `HOCKER_AGENT_KEY` está configurado.
+- **Autenticación HTTP obligatoria**: `HOCKER_AGENT_KEY` (mínimo 24 caracteres) es requerida al arrancar y debe ser diferente del secreto HMAC. Toda ruta salvo `/health` y `/ready` exige `x-hocker-agent-key`; no existe modo anónimo al omitirla.
+
+## Política de exposición HTTP y ejecución local (contrato verificado en main)
+
+El código efectivo en `src/config.ts` enlaza el servidor a
+`HOCKER_AGENT_HOST=127.0.0.1` por defecto. Escuchar en LAN solo es posible
+con `HOCKER_AGENT_ALLOW_LAN=true` explícito, y requiere revisar
+red/firewall y acceso autorizado. No expongas este servicio a Internet
+directamente; TLS y un reverse proxy autenticado deben validarse por separado.
+
+`HOCKER_AGENT_KEY` es **obligatoria desde el arranque** (mínimo 24 caracteres)
+y distinta de `HOCKER_COMMAND_HMAC_SECRET`. El servidor ejecuta
+`isAuthorized()` antes de las rutas de stats, auditoría y compliance.
+`GET /health` y `GET /ready` son excepciones sin clave: revelan
+solo el estado mínimo para sondas. El código no activa
+`shell.exec` por defecto; requiere `HOCKER_ALLOW_UNSANDBOXED_SHELL=true`
+además de sandbox habilitado y controles de escritura vigentes.
+
+Estas garantías pertenecen al **código de main**, no prueban que un
+proceso esté ejecutándose en un host físico. Comprobar heartbeat
+persistido, `/ready` HTTP 200, identidad del despliegue y rollback
+antes de llamar operativo al nodo.
 
 ## Estado real frente a estado almacenado
 
@@ -159,8 +180,9 @@ físico 24/7.
 | GET | `/health` | Público | Estado del nodo, project_id, sandbox |
 | GET | `/ready` | Público | readiness check simple |
 | GET | `/stats` | `x-hocker-agent-key` | Métricas en tiempo real: heartbeats, comandos, uptime |
-| GET | `/v1/jurix/audit/logs` | — | Logs de auditoría (tabla `audit_logs`) |
-| GET | `/v1/jurix/compliance` | — | Eventos de compliance (tabla `compliance_events`) |
+| GET | `/v1/jurix/audit/logs` | `x-hocker-agent-key` | Logs de auditoría limitados al proyecto configurado |
+| GET | `/v1/jurix/compliance` | `x-hocker-agent-key` | Eventos de compliance limitados al proyecto configurado |
+| POST | `/v1/jurix/compliance/create` | `x-hocker-agent-key` | Inserción dentro de `PROJECT_ID` (acción material; no usar como prueba de readiness) |
 
 ## Scripts de servicio
 
