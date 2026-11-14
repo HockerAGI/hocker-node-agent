@@ -132,6 +132,26 @@ npm start
 - **Sandbox**: Filesystem aislado bajo `SANDBOX_ROOT`. Prevención de path traversal (sandbox escape).
 - **Auth en /stats**: El endpoint `/stats` requiere header `x-hocker-agent-key` cuando `HOCKER_AGENT_KEY` está configurado.
 
+## Estado real frente a estado almacenado
+
+El atributo `nodes.status='online'` no es una prueba de vida. El nodo
+se considera **READY** únicamente cuando los controles de Supabase son
+accesibles, el `kill_switch` está desactivado y existe un heartbeat
+**persistido correctamente** en `public.nodes` dentro de la ventana de
+tres intervalos configurados. `/health` sólo acredita que el proceso HTTP
+responde; `/ready` devuelve HTTP 503 y
+`status=heartbeat_not_fresh` si la escritura de presencia falló o quedó
+obsoleta. En `/stats`, `heartbeat.last_at` es un intento y
+`heartbeat.last_successful_at` una escritura efectiva. La tabla
+histórica `node_heartbeats` no es el mecanismo utilizado por este
+agente: su presencia se actualiza mediante `nodes.upsert`.
+
+No activar `allow_write=true` ni ejecutar comandos `shell.exec` para
+probar el heartbeat. La primera certificación es sólo lectura y exige
+un servicio auténtico en una máquina autorizada, con credenciales
+fuera de GitHub y del chat. No confundir un CI verde con un servicio
+físico 24/7.
+
 ## Endpoints HTTP
 
 | Método | Ruta | Auth | Descripción |
