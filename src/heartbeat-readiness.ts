@@ -10,6 +10,6 @@ export function hasFreshNodeHeartbeat(
   if (!lastSuccessIso || !Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs < 1) return false;
   const timestamp = Date.parse(lastSuccessIso);
   if (!Number.isFinite(timestamp) || timestamp > now) return false;
-  const maxAgeMs = Math.max(15_000, Math.min(heartbeatIntervalMs * 3, 10 * 60_000));
+  const maxAgeMs = heartbeatIntervalMs * 3;
   return now - timestamp <= maxAgeMs;
 }
