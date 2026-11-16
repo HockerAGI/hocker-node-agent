@@ -34,6 +34,7 @@ echo "=== ENV CHECK (presence only: NO secret hashes or values) ==="
 python3 - <<'PY'
 from pathlib import Path
 import sys
+import os
 
 env = Path(".env")
 keys = {}
@@ -43,17 +44,20 @@ if env.is_file():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        keys[key.strip()] = bool(value.strip().strip('"').strip("'"))
+        keys[key.strip()] = value.strip().strip('"').strip("'")
 
-required = [
-    "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HOCKER_AGENT_KEY",
-    "PROJECT_ID", "NODE_ID",
-]
-missing = [key for key in required if not keys.get(key)]
-hmac = keys.get("HOCKER_COMMAND_HMAC_SECRET") or keys.get("COMMAND_HMAC_SECRET")
+def configured(key):
+    # Runtime precedence matches dotenv's default (existing process env wins).
+    return bool(os.environ.get(key) or keys.get(key))
+
+required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HOCKER_AGENT_KEY"]
+missing = [key for key in required if not configured(key)]
+hmac = configured("HOCKER_COMMAND_HMAC_SECRET") or configured("COMMAND_HMAC_SECRET")
 for key in required:
-    print(f"{key}: {'SET' if keys.get(key) else 'MISSING'}")
+    print(f"{key}: {'SET' if configured(key) else 'MISSING'}")
 print(f"COMMAND_HMAC: {'SET' if hmac else 'MISSING'}")
+for key in ("PROJECT_ID", "NODE_ID"):
+    print(f"{key}: {'SET' if configured(key) else 'DEFAULT'}")
 sys.exit(1 if missing or not hmac else 0)
 PY
 
