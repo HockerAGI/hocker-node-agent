@@ -34,7 +34,7 @@ test("service.env values are not evaluated as shell code, even with special char
     const helper = path.join(temp, "load-env.sh");
     const marker = path.join(temp, "should-not-exist");
     await copyFile(fileURLToPath(scriptUrl("load-env.sh")), helper);
-    const literal = "folder\\$(touch " + marker + ")";
+    const literal = 'folder$(touch "' + marker + '")';
     await writeFile(path.join(temp, "service.env"),
       "HOCKER_NODE_AGENT_REPO_DIR=" + literal + "\nPORT=18181\nUNKNOWN_OPTION=ignored\n");
     const result = spawnSync("bash", ["-c",
