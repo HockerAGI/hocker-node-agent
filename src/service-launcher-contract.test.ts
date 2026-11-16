@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, writeFile, copyFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,8 @@ test("operational shell scripts parse correctly and load service.env as data", a
   const installer = await read("install-termux-ubuntu.sh");
   assert.match(installer, /scripts\/service\/load-env\.sh/);
   assert.match(installer, /chmod 600 "\$SERVICE_BASE\/service\.env"/);
+  assert.doesNotMatch(installer, /printf 'PORT=/);
+  assert.match(await read("load-env.sh"), /PORT in an older service\.env is deliberately ignored/);
 });
 
 test("service.env values are not evaluated as shell code, even with special characters", async () => {
@@ -41,7 +43,7 @@ test("service.env values are not evaluated as shell code, even with special char
       '. "$1"; printf "%s|%s|%s" "$HOCKER_NODE_AGENT_REPO_DIR" "$PORT" "${UNKNOWN_OPTION:-unset}"',
       "--", helper], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, literal + "|18181|unset");
+    assert.equal(result.stdout, literal + "||unset");
     assert.equal(existsSync(marker), false);
   } finally { await rm(temp, { recursive: true, force: true }); }
 });
@@ -57,4 +59,28 @@ test("doctor is fail-closed, reveals no hashes or secret values and stop is PID 
   assert.match(stop, /PIDFILE_PROCESS_MISMATCH/);
   assert.match(status, /HOCKER_NODE_AGENT_SHOW_LOGS:-false/);
   assert.match(start, /PIDFILE_PROCESS_MISMATCH/);
+});
+
+test("custom repo .env port and inherited PORT remain authoritative over old service.env", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker port precedence "));
+  try {
+    const helper = path.join(temp, "load-env.sh");
+    const repo = path.join(temp, "app repo");
+    await mkdir(repo);
+    await copyFile(fileURLToPath(scriptUrl("load-env.sh")), helper);
+    await writeFile(path.join(repo, ".env"), 'PORT="18443"\nNODE_ID=hocker-node-1\n');
+    await writeFile(path.join(temp, "service.env"),
+      "HOCKER_NODE_AGENT_REPO_DIR=" + repo + "\nPORT=8081\n");
+    const script = '. "$1"; printf "%s" "$PORT"';
+    const fromEnv = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "" },
+    });
+    assert.equal(fromEnv.status, 0, fromEnv.stderr);
+    assert.equal(fromEnv.stdout, "18443");
+    const inherited = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "19555" },
+    });
+    assert.equal(inherited.status, 0, inherited.stderr);
+    assert.equal(inherited.stdout, "19555");
+  } finally { await rm(temp, { recursive: true, force: true }); }
 });
