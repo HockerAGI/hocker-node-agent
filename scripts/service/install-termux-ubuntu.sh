@@ -5,9 +5,14 @@ REPO_DIR="${HOCKER_NODE_AGENT_REPO_DIR:-$HOME/HOCKER_PUSH_REAL/hocker-node-agent
 SERVICE_BASE="${HOCKER_NODE_AGENT_SERVICE_BASE:-/root/HOCKER_SERVICES/hocker-node-agent}"
 
 cd "$REPO_DIR"
+REPO_DIR="$(pwd -P)"
 
 mkdir -p "$SERVICE_BASE"
+SERVICE_BASE="$(cd "$SERVICE_BASE" && pwd -P)"
+# Dedicated operational directory: no writable service configuration for others.
+chmod 700 "$SERVICE_BASE"
 
+cp -v scripts/service/load-env.sh "$SERVICE_BASE/load-env.sh"
 cp -v scripts/service/run.sh "$SERVICE_BASE/run.sh"
 cp -v scripts/service/start.sh "$SERVICE_BASE/start.sh"
 cp -v scripts/service/stop.sh "$SERVICE_BASE/stop.sh"
@@ -18,12 +23,18 @@ cp -v scripts/service/doctor.sh "$SERVICE_BASE/doctor.sh"
 chmod +x "$SERVICE_BASE"/*.sh
 chmod +x scripts/service/*.sh
 
-cat > "$SERVICE_BASE/service.env" <<ENV
-HOCKER_NODE_AGENT_REPO_DIR=$REPO_DIR
-HOCKER_NODE_AGENT_SERVICE_BASE=$SERVICE_BASE
-HOCKER_NODE_AGENT_LOG_FILE=/tmp/hocker-node-agent-service.log
-PORT=8081
-ENV
+# The file is DATA, not sourced by any operational script.
+# Write it with restrictive permissions; literal values may contain spaces.
+(
+  umask 077
+  {
+    printf 'HOCKER_NODE_AGENT_REPO_DIR=%s\n' "$REPO_DIR"
+    printf 'HOCKER_NODE_AGENT_SERVICE_BASE=%s\n' "$SERVICE_BASE"
+    printf 'HOCKER_NODE_AGENT_LOG_FILE=%s\n' "/tmp/hocker-node-agent-service.log"
+    printf 'PORT=%s\n' "8081"
+  } > "$SERVICE_BASE/service.env"
+)
+chmod 600 "$SERVICE_BASE/service.env"
 
 echo
 echo "Servicio instalado en: $SERVICE_BASE"
