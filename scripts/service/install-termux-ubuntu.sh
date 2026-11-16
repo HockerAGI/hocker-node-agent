@@ -31,13 +31,13 @@ chmod +x scripts/service/*.sh
     printf 'HOCKER_NODE_AGENT_REPO_DIR=%s\n' "$REPO_DIR"
     printf 'HOCKER_NODE_AGENT_SERVICE_BASE=%s\n' "$SERVICE_BASE"
     printf 'HOCKER_NODE_AGENT_LOG_FILE=%s\n' "/tmp/hocker-node-agent-service.log"
-    printf 'PORT=%s\n' "8081"
   } > "$SERVICE_BASE/service.env"
 )
 chmod 600 "$SERVICE_BASE/service.env"
 
 echo
 echo "Servicio instalado en: $SERVICE_BASE"
+echo "PORT se respeta desde el entorno del proceso o desde .env del repositorio."
 echo
 echo "Comandos:"
 echo "$SERVICE_BASE/start.sh"
