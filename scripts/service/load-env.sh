@@ -37,6 +37,7 @@ if [[ -z "${PORT:-}" && -n "${HOCKER_NODE_AGENT_REPO_DIR:-}" &&
     if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 65535 )); then
       export PORT="$value"
     fi
-    break
+    # dotenv resolves duplicate definitions using the final one; preserve
+    # that behavior instead of selecting the first PORT entry.
   done < "$HOCKER_NODE_AGENT_REPO_DIR/.env"
 fi
