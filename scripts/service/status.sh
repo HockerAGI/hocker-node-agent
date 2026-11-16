@@ -11,8 +11,30 @@ PORT="${PORT:-8081}"
 LOG_FILE="${HOCKER_NODE_AGENT_LOG_FILE:-/tmp/hocker-node-agent-service.log}"
 
 echo "=== PROCESO ==="
-
-if [ -f "$PIDFILE" ]; then
+GROUPFILE="$SERVICE_BASE/service.group"
+. "$SCRIPT_DIR/service-group.sh"
+if [[ -f "$GROUPFILE" ]]; then
+  read -r GROUP_ID SESSION_TOKEN < "$GROUPFILE" || true
+  if [[ "${GROUP_ID:-}" =~ ^[0-9]+$ ]] &&
+      [[ -n "$(service_group_pids "$GROUP_ID")" ]]; then
+    if ! service_group_verified "$GROUP_ID" "${SESSION_TOKEN:-}"; then
+      echo "running: unverified_process_group"
+      exit 1
+    fi
+    if [[ -f "$PIDFILE" ]] &&
+        [[ "$(cat "$PIDFILE" 2>/dev/null || true)" == "$GROUP_ID" ]] &&
+        [[ "$(ps -o args= -p "$GROUP_ID" 2>/dev/null || true)" == *"$SCRIPT_DIR/run.sh"* ]]; then
+      echo "running: true"
+      echo "pid: $GROUP_ID"
+    else
+      echo "running: orphaned_group"
+      echo "pgid: $GROUP_ID"
+      exit 1
+    fi
+  else
+    echo "running: false"
+  fi
+elif [ -f "$PIDFILE" ]; then
   PID="$(cat "$PIDFILE" 2>/dev/null || true)"
   if [[ "${PID:-}" =~ ^[0-9]+$ ]] && (( PID > 1 )) && kill -0 "$PID" 2>/dev/null &&
       [[ "$(ps -o args= -p "$PID" 2>/dev/null || true)" == *"$SCRIPT_DIR/run.sh"* ]]; then

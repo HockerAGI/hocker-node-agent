@@ -13,6 +13,7 @@ SERVICE_BASE="$(cd "$SERVICE_BASE" && pwd -P)"
 chmod 700 "$SERVICE_BASE"
 
 cp -v scripts/service/load-env.sh "$SERVICE_BASE/load-env.sh"
+cp -v scripts/service/service-group.sh "$SERVICE_BASE/service-group.sh"
 cp -v scripts/service/run.sh "$SERVICE_BASE/run.sh"
 cp -v scripts/service/start.sh "$SERVICE_BASE/start.sh"
 cp -v scripts/service/stop.sh "$SERVICE_BASE/stop.sh"

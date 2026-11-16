@@ -11,7 +11,7 @@ const scriptUrl = (name: string) => new URL("../scripts/service/" + name, import
 const read = (name: string) => readFile(scriptUrl(name), "utf8");
 
 test("operational shell scripts parse correctly and load service.env as data", async () => {
-  for (const filename of ["load-env.sh", "install-termux-ubuntu.sh", "start.sh",
+  for (const filename of ["load-env.sh", "service-group.sh", "install-termux-ubuntu.sh", "start.sh",
     "stop.sh", "run.sh", "status.sh", "doctor.sh", "restart.sh"]) {
     const file = fileURLToPath(scriptUrl(filename));
     const check = spawnSync("bash", ["-n", file], { encoding: "utf8" });
@@ -25,6 +25,7 @@ test("operational shell scripts parse correctly and load service.env as data", a
   }
   const installer = await read("install-termux-ubuntu.sh");
   assert.match(installer, /scripts\/service\/load-env\.sh/);
+  assert.match(installer, /scripts\/service\/service-group\.sh/);
   assert.match(installer, /chmod 600 "\$SERVICE_BASE\/service\.env"/);
   assert.doesNotMatch(installer, /printf 'PORT=/);
   assert.match(await read("load-env.sh"), /PORT in an older service\.env is deliberately ignored/);
@@ -82,5 +83,45 @@ test("custom repo .env port and inherited PORT remain authoritative over old ser
     });
     assert.equal(inherited.status, 0, inherited.stderr);
     assert.equal(inherited.stdout, "19555");
+    await writeFile(path.join(repo, ".env"), "PORT=18181\nPORT=19445\n");
+    const lastWins = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "" },
+    });
+    assert.equal(lastWins.status, 0, lastWins.stderr);
+    assert.equal(lastWins.stdout, "19445");
   } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("stop recovers a marker-verified orphan group but cannot kill a foreign group", async () => {
+  const { spawn } = await import("node:child_process");
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker isolated worker "));
+  const token = "a".repeat(32);
+  const foreign = "b".repeat(32);
+  const stopPath = path.join(temp, "stop.sh");
+  try {
+    for (const file of ["stop.sh","load-env.sh","service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    await writeFile(path.join(temp, "service.env"),
+      "HOCKER_NODE_AGENT_SERVICE_BASE=" + temp + "\n");
+
+    const child = spawn("setsid", ["env", "HOCKER_NODE_AGENT_SERVICE_SESSION="+token, "sleep", "30"],
+      { stdio: "ignore" });
+    assert.ok(child.pid && child.pid > 1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await writeFile(path.join(temp,"service.group"), child.pid+" "+foreign+"\n");
+    await writeFile(path.join(temp,"service.pid"), String(child.pid)+"\n");
+
+    const reject = spawnSync("bash", [stopPath], { encoding:"utf8" });
+    assert.notEqual(reject.status, 0);
+    assert.match(reject.stderr, /PIDFILE_PROCESS_MISMATCH/);
+    assert.equal(existsSync(path.join(temp,"service.group")), true);
+
+    await writeFile(path.join(temp,"service.group"), child.pid+" "+token+"\n");
+    const allowed = spawnSync("bash", [stopPath], { encoding:"utf8" });
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(existsSync(path.join(temp,"service.group")), false);
+  } finally {
+    await rm(temp, {recursive:true,force:true});
+  }
 });
