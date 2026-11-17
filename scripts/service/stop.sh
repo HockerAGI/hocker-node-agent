@@ -18,7 +18,11 @@ if [[ -f "$GROUPFILE" ]]; then
     echo "SERVICE_GROUP_METADATA_INVALID: refusing unsafe termination" >&2
     exit 1
   fi
-  if [[ -n "$(service_group_pids "$GROUP_ID")" ]]; then
+  GROUP_PIDS="$(service_group_pids "$GROUP_ID")" || {
+    echo "SERVICE_GROUP_ENUMERATION_FAILED: preserving shutdown metadata" >&2
+    exit 1
+  }
+  if [[ -n "$GROUP_PIDS" ]]; then
     if ! service_group_verified "$GROUP_ID" "$SESSION_TOKEN"; then
       echo "PIDFILE_PROCESS_MISMATCH: foreign or unverifiable service group; refusing kill" >&2
       exit 1
@@ -26,10 +30,18 @@ if [[ -f "$GROUPFILE" ]]; then
     echo "Stopping isolated service process group $GROUP_ID"
     kill -TERM -- "-$GROUP_ID" 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-      [[ -z "$(service_group_pids "$GROUP_ID")" ]] && break
+      GROUP_PIDS="$(service_group_pids "$GROUP_ID")" || {
+        echo "SERVICE_GROUP_ENUMERATION_FAILED: preserving shutdown metadata" >&2
+        exit 1
+      }
+      [[ -z "$GROUP_PIDS" ]] && break
       sleep 0.25
     done
-    if [[ -n "$(service_group_pids "$GROUP_ID")" ]]; then
+    GROUP_PIDS="$(service_group_pids "$GROUP_ID")" || {
+      echo "SERVICE_GROUP_ENUMERATION_FAILED: preserving shutdown metadata" >&2
+      exit 1
+    }
+    if [[ -n "$GROUP_PIDS" ]]; then
       echo "SERVICE_GROUP_STILL_RUNNING: intervention required; refusing false success" >&2
       exit 1
     fi
