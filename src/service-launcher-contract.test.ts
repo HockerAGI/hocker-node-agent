@@ -105,7 +105,12 @@ test("stop recovers a marker-verified orphan group but cannot kill a foreign gro
     await writeFile(path.join(temp, "service.env"),
       "HOCKER_NODE_AGENT_SERVICE_BASE=" + temp + "\n");
 
-    const child = spawn("setsid", ["env", "HOCKER_NODE_AGENT_SERVICE_SESSION="+token, "sleep", "30"],
+    // A valid marker near the front of a large environment must not produce
+    // a false rejection through grep -q / SIGPIPE under bash pipefail.
+    const largeEnv = Array.from({ length: 12 }, (_, i) =>
+      "HOCKER_LARGE_TEST_" + i + "=" + "x".repeat(6500));
+    const child = spawn("setsid",
+      ["env", "HOCKER_NODE_AGENT_SERVICE_SESSION="+token, ...largeEnv, "sleep", "30"],
       { stdio: "ignore" });
     assert.ok(child.pid && child.pid > 1);
     await new Promise((resolve) => setTimeout(resolve, 120));
