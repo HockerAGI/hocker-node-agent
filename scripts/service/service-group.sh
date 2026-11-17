@@ -17,7 +17,7 @@ service_group_verified() {
       continue
     fi
     if ! tr '\0' '\n' < "/proc/$member/environ" 2>/dev/null |
-        grep -Fxq "HOCKER_NODE_AGENT_SERVICE_SESSION=$marker"; then
+        grep -Fx "HOCKER_NODE_AGENT_SERVICE_SESSION=$marker" >/dev/null; then
       kill -0 "$member" 2>/dev/null && return 1
       continue
     fi
