@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# service.env is parsed as data only (never evaluated as shell code).
+. "$SCRIPT_DIR/load-env.sh"
+
 REPO_DIR="${HOCKER_NODE_AGENT_REPO_DIR:-$HOME/HOCKER_PUSH_REAL/hocker-node-agent}"
 PORT="${PORT:-8081}"
 
@@ -26,39 +30,35 @@ npm run typecheck
 npm run build
 
 echo
-echo "=== ENV CHECK ==="
+echo "=== ENV CHECK (presence only: NO secret hashes or values) ==="
 python3 - <<'PY'
 from pathlib import Path
-import hashlib
+import sys
+import os
 
 env = Path(".env")
 keys = {}
-if env.exists():
+if env.is_file():
     for raw in env.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        k, v = line.split("=", 1)
-        keys[k.strip()] = v.strip().strip('"').strip("'")
+        key, value = line.split("=", 1)
+        keys[key.strip()] = value.strip().strip('"').strip("'")
 
-def fp(value):
-    if not value:
-        return "MISSING"
-    return hashlib.sha256(value.encode()).hexdigest()[:12]
+def configured(key):
+    # Runtime precedence matches dotenv's default (existing process env wins).
+    return bool(os.environ.get(key) or keys.get(key))
 
-for key in [
-    "SUPABASE_URL",
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "HOCKER_COMMAND_HMAC_SECRET",
-    "COMMAND_HMAC_SECRET",
-    "PROJECT_ID",
-    "NODE_ID",
-]:
-    value = keys.get(key)
-    if "SECRET" in key or "KEY" in key:
-        print(f"{key}: {fp(value)}")
-    else:
-        print(f"{key}: {'SET' if value else 'MISSING'}")
+required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HOCKER_AGENT_KEY"]
+missing = [key for key in required if not configured(key)]
+hmac = configured("HOCKER_COMMAND_HMAC_SECRET") or configured("COMMAND_HMAC_SECRET")
+for key in required:
+    print(f"{key}: {'SET' if configured(key) else 'MISSING'}")
+print(f"COMMAND_HMAC: {'SET' if hmac else 'MISSING'}")
+for key in ("PROJECT_ID", "NODE_ID"):
+    print(f"{key}: {'SET' if configured(key) else 'DEFAULT'}")
+sys.exit(1 if missing or not hmac else 0)
 PY
 
 echo
@@ -70,14 +70,15 @@ echo "=== PROCESOS ==="
 ps aux | grep -E "hocker-node-agent|node dist/index.js|run.sh" | grep -v grep || true
 
 echo
-echo "=== HEALTH DIRECT ==="
-curl -sS "http://127.0.0.1:${PORT}/health" || true
+echo "=== HEALTH / READY HTTP (no secret payloads) ==="
+HEALTH_CODE="$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${PORT}/health" || true)"
+READY_CODE="$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${PORT}/ready" || true)"
+echo "health_http: $HEALTH_CODE"
+echo "ready_http: $READY_CODE"
 
-echo
-echo
-echo "=== READY DIRECT ==="
-curl -sS "http://127.0.0.1:${PORT}/ready" || true
-
-echo
-echo
-echo "OK: doctor finalizado."
+if [[ "$HEALTH_CODE" != "200" || "$READY_CODE" != "200" ]]; then
+  echo "NODE_NOT_READY: proceso, controles o heartbeat requieren diagnóstico local" >&2
+  exit 1
+fi
+echo "LOCAL_HEALTH_READY_CONFIRMED: HTTP 200/200"
+echo "Nota: valida por separado heartbeat fresco en Supabase; no declara runtime dedicado verificado."

@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+const scriptUrl = (name: string) => new URL("../scripts/service/" + name, import.meta.url);
+const read = (name: string) => readFile(scriptUrl(name), "utf8");
+
+test("operational shell scripts parse correctly and load service.env as data", async () => {
+  for (const filename of ["load-env.sh", "service-group.sh", "install-termux-ubuntu.sh", "start.sh",
+    "stop.sh", "run.sh", "status.sh", "doctor.sh", "restart.sh"]) {
+    const file = fileURLToPath(scriptUrl(filename));
+    const check = spawnSync("bash", ["-n", file], { encoding: "utf8" });
+    assert.equal(check.status, 0, filename + ": " + check.stderr);
+  }
+  for (const filename of ["start.sh", "stop.sh", "run.sh", "status.sh", "doctor.sh"]) {
+    const src = await read(filename);
+    assert.match(src, /\. "\$SCRIPT_DIR\/load-env\.sh"/);
+    assert.ok(src.indexOf("load-env.sh") < src.indexOf("HOCKER_NODE_AGENT_REPO_DIR") ||
+      !src.includes("HOCKER_NODE_AGENT_REPO_DIR"));
+  }
+  const installer = await read("install-termux-ubuntu.sh");
+  assert.match(installer, /scripts\/service\/load-env\.sh/);
+  assert.match(installer, /scripts\/service\/service-group\.sh/);
+  assert.match(installer, /chmod 600 "\$SERVICE_BASE\/service\.env"/);
+  assert.doesNotMatch(installer, /printf 'PORT=/);
+  assert.match(await read("load-env.sh"), /PORT in an older service\.env is deliberately ignored/);
+});
+
+test("service.env values are not evaluated as shell code, even with special characters", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker service safe "));
+  try {
+    const helper = path.join(temp, "load-env.sh");
+    const marker = path.join(temp, "should-not-exist");
+    await copyFile(fileURLToPath(scriptUrl("load-env.sh")), helper);
+    const literal = 'folder$(touch "' + marker + '")';
+    await writeFile(path.join(temp, "service.env"),
+      "HOCKER_NODE_AGENT_REPO_DIR=" + literal + "\nPORT=18181\nUNKNOWN_OPTION=ignored\n");
+    const result = spawnSync("bash", ["-c",
+      '. "$1"; printf "%s|%s|%s" "$HOCKER_NODE_AGENT_REPO_DIR" "$PORT" "${UNKNOWN_OPTION:-unset}"',
+      "--", helper], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, literal + "||unset");
+    assert.equal(existsSync(marker), false);
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("doctor is fail-closed, reveals no hashes or secret values and stop is PID scoped", async () => {
+  const [doctor, stop, status, start] = await Promise.all([
+    read("doctor.sh"), read("stop.sh"), read("status.sh"), read("start.sh"),
+  ]);
+  assert.doesNotMatch(doctor, /hashlib|hexdigest|sha256\(/i);
+  assert.match(doctor, /"\$HEALTH_CODE" != "200" \|\| "\$READY_CODE" != "200"/);
+  assert.match(doctor, /exit 1/);
+  assert.doesNotMatch(stop, /pkill -f/);
+  assert.match(stop, /PIDFILE_PROCESS_MISMATCH/);
+  assert.match(status, /HOCKER_NODE_AGENT_SHOW_LOGS:-false/);
+  assert.match(start, /PIDFILE_PROCESS_MISMATCH/);
+});
+
+test("custom repo .env port and inherited PORT remain authoritative over old service.env", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker port precedence "));
+  try {
+    const helper = path.join(temp, "load-env.sh");
+    const repo = path.join(temp, "app repo");
+    await mkdir(repo);
+    await copyFile(fileURLToPath(scriptUrl("load-env.sh")), helper);
+    await writeFile(path.join(repo, ".env"), 'PORT="18443"\nNODE_ID=hocker-node-1\n');
+    await writeFile(path.join(temp, "service.env"),
+      "HOCKER_NODE_AGENT_REPO_DIR=" + repo + "\nPORT=8081\n");
+    const script = '. "$1"; printf "%s" "$PORT"';
+    const fromEnv = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "" },
+    });
+    assert.equal(fromEnv.status, 0, fromEnv.stderr);
+    assert.equal(fromEnv.stdout, "18443");
+    const inherited = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "19555" },
+    });
+    assert.equal(inherited.status, 0, inherited.stderr);
+    assert.equal(inherited.stdout, "19555");
+    await writeFile(path.join(repo, ".env"), "PORT=18181\nPORT=19445\n");
+    const lastWins = spawnSync("bash", ["-c", script, "--", helper], {
+      encoding: "utf8", env: { ...process.env, PORT: "" },
+    });
+    assert.equal(lastWins.status, 0, lastWins.stderr);
+    assert.equal(lastWins.stdout, "19445");
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("stop recovers a marker-verified orphan group but cannot kill a foreign group", async () => {
+  const { spawn } = await import("node:child_process");
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker isolated worker "));
+  const token = "a".repeat(32);
+  const foreign = "b".repeat(32);
+  const stopPath = path.join(temp, "stop.sh");
+  try {
+    for (const file of ["stop.sh","load-env.sh","service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    await writeFile(path.join(temp, "service.env"),
+      "HOCKER_NODE_AGENT_SERVICE_BASE=" + temp + "\n");
+
+    // A valid marker near the front of a large environment must not produce
+    // a false rejection through grep -q / SIGPIPE under bash pipefail.
+    const largeEnv = Array.from({ length: 12 }, (_, i) =>
+      "HOCKER_LARGE_TEST_" + i + "=" + "x".repeat(6500));
+    const child = spawn("setsid",
+      ["env", "HOCKER_NODE_AGENT_SERVICE_SESSION="+token, ...largeEnv, "sleep", "30"],
+      { stdio: "ignore" });
+    assert.ok(child.pid && child.pid > 1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await writeFile(path.join(temp,"service.group"), child.pid+" "+foreign+"\n");
+    await writeFile(path.join(temp,"service.pid"), String(child.pid)+"\n");
+
+    const reject = spawnSync("bash", [stopPath], { encoding:"utf8" });
+    assert.notEqual(reject.status, 0);
+    assert.match(reject.stderr, /PIDFILE_PROCESS_MISMATCH/);
+    assert.equal(existsSync(path.join(temp,"service.group")), true);
+
+    await writeFile(path.join(temp,"service.group"), child.pid+" "+token+"\n");
+    const allowed = spawnSync("bash", [stopPath], { encoding:"utf8" });
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(existsSync(path.join(temp,"service.group")), false);
+  } finally {
+    await rm(temp, {recursive:true,force:true});
+  }
+});
+
+test("service group enumeration error preserves state instead of reporting a false stop", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker enumeration error "));
+  try {
+    for (const file of ["stop.sh", "load-env.sh", "service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    const bin = path.join(temp, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(path.join(temp, "service.env"), "HOCKER_NODE_AGENT_SERVICE_BASE="+temp+"\n");
+    await writeFile(path.join(temp, "service.group"), "99999 "+"a".repeat(32)+"\n");
+    await writeFile(path.join(temp, "service.pid"), "99999\n");
+    const stopped = spawnSync("bash", [path.join(temp, "stop.sh")], {
+      encoding: "utf8", env: { ...process.env, PATH: bin+":"+process.env.PATH },
+    });
+    assert.notEqual(stopped.status, 0);
+    assert.match(stopped.stderr, /SERVICE_GROUP_ENUMERATION_FAILED/);
+    assert.equal(existsSync(path.join(temp, "service.group")), true);
+    assert.equal(existsSync(path.join(temp, "service.pid")), true);
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("supervisor bootstrap works before NVM and scoped shell children retain group marker", async () => {
+  const start = await read("start.sh");
+  assert.doesNotMatch(start, /TOKEN="\$\(node -e/);
+  assert.match(start, /od -An -N16 -tx1 \/dev\/urandom/);
+  const sandbox = await readFile(new URL("./lib/sandbox.ts", import.meta.url), "utf8");
+  assert.match(sandbox, /env\.HOCKER_NODE_AGENT_SERVICE_SESSION = session/);
+});
+
+test("failed PGID verification still retains supervised-process recovery metadata", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker launch pgid error "));
+  try {
+    for (const file of ["start.sh", "load-env.sh", "service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    const bin = path.join(temp, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(path.join(bin, "setsid"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await writeFile(path.join(temp, "service.env"), "HOCKER_NODE_AGENT_SERVICE_BASE="+temp+"\n");
+    const result = spawnSync("bash", [path.join(temp, "start.sh")], {
+      encoding:"utf8", env:{ ...process.env, PATH:bin+":"+process.env.PATH },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SERVICE_GROUP_START_UNVERIFIED/);
+    assert.equal(existsSync(path.join(temp, "service.group")), true);
+    assert.equal(existsSync(path.join(temp, "service.pid")), true);
+  } finally { await rm(temp, {recursive:true,force:true}); }
+});
