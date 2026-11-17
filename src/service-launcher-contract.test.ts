@@ -155,3 +155,24 @@ test("supervisor bootstrap works before NVM and scoped shell children retain gro
   const sandbox = await readFile(new URL("./lib/sandbox.ts", import.meta.url), "utf8");
   assert.match(sandbox, /env\.HOCKER_NODE_AGENT_SERVICE_SESSION = session/);
 });
+
+test("failed PGID verification still retains supervised-process recovery metadata", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker launch pgid error "));
+  try {
+    for (const file of ["start.sh", "load-env.sh", "service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    const bin = path.join(temp, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(path.join(bin, "setsid"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await writeFile(path.join(temp, "service.env"), "HOCKER_NODE_AGENT_SERVICE_BASE="+temp+"\n");
+    const result = spawnSync("bash", [path.join(temp, "start.sh")], {
+      encoding:"utf8", env:{ ...process.env, PATH:bin+":"+process.env.PATH },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SERVICE_GROUP_START_UNVERIFIED/);
+    assert.equal(existsSync(path.join(temp, "service.group")), true);
+    assert.equal(existsSync(path.join(temp, "service.pid")), true);
+  } finally { await rm(temp, {recursive:true,force:true}); }
+});
