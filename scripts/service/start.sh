@@ -59,15 +59,17 @@ TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
 # A fresh session/process group isolates supervisor AND orphaned descendants.
 HOCKER_NODE_AGENT_SERVICE_SESSION="$TOKEN" setsid bash "$SCRIPT_DIR/run.sh" >/dev/null 2>&1 &
 PID="$!"
+# Persist a recovery identity BEFORE any fallible ps/PGID verification.
+# If the lookup fails, stop.sh can still authenticate a live group later.
+(
+  umask 077
+  printf '%s %s\n' "$PID" "$TOKEN" > "$GROUPFILE"
+  printf '%s\n' "$PID" > "$PIDFILE"
+)
 sleep 0.1
 PGID="$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d '[:space:]' || true)"
 if [[ "$PGID" != "$PID" ]]; then
-  echo "SERVICE_GROUP_START_UNVERIFIED: no PID files written" >&2
+  echo "SERVICE_GROUP_START_UNVERIFIED: recovery metadata preserved" >&2
   exit 1
 fi
-(
-  umask 077
-  printf '%s %s\n' "$PGID" "$TOKEN" > "$GROUPFILE"
-  printf '%s\n' "$PID" > "$PIDFILE"
-)
 echo "hocker-node-agent supervisor iniciado. PID / group: $PID"
