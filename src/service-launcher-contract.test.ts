@@ -125,3 +125,33 @@ test("stop recovers a marker-verified orphan group but cannot kill a foreign gro
     await rm(temp, {recursive:true,force:true});
   }
 });
+
+test("service group enumeration error preserves state instead of reporting a false stop", async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "hocker enumeration error "));
+  try {
+    for (const file of ["stop.sh", "load-env.sh", "service-group.sh"]) {
+      await copyFile(fileURLToPath(scriptUrl(file)), path.join(temp, file));
+    }
+    const bin = path.join(temp, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(path.join(temp, "service.env"), "HOCKER_NODE_AGENT_SERVICE_BASE="+temp+"\n");
+    await writeFile(path.join(temp, "service.group"), "99999 "+"a".repeat(32)+"\n");
+    await writeFile(path.join(temp, "service.pid"), "99999\n");
+    const stopped = spawnSync("bash", [path.join(temp, "stop.sh")], {
+      encoding: "utf8", env: { ...process.env, PATH: bin+":"+process.env.PATH },
+    });
+    assert.notEqual(stopped.status, 0);
+    assert.match(stopped.stderr, /SERVICE_GROUP_ENUMERATION_FAILED/);
+    assert.equal(existsSync(path.join(temp, "service.group")), true);
+    assert.equal(existsSync(path.join(temp, "service.pid")), true);
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("supervisor bootstrap works before NVM and scoped shell children retain group marker", async () => {
+  const start = await read("start.sh");
+  assert.doesNotMatch(start, /TOKEN="\$\(node -e/);
+  assert.match(start, /od -An -N16 -tx1 \/dev\/urandom/);
+  const sandbox = await readFile(new URL("./lib/sandbox.ts", import.meta.url), "utf8");
+  assert.match(sandbox, /env\.HOCKER_NODE_AGENT_SERVICE_SESSION = session/);
+});
