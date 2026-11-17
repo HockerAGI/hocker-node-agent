@@ -107,6 +107,11 @@ function safeChildEnv(): NodeJS.ProcessEnv {
   };
 
   if (process.env.TERM) env.TERM = String(process.env.TERM);
+  // Non-secret group identity keeps explicitly authorized shell children stoppable.
+  const session = process.env.HOCKER_NODE_AGENT_SERVICE_SESSION;
+  if (session && /^[a-f0-9]{32}$/.test(session)) {
+    env.HOCKER_NODE_AGENT_SERVICE_SESSION = session;
+  }
   return env;
 }
 
