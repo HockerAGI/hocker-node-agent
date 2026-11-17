@@ -14,14 +14,19 @@ mkdir -p "$SERVICE_BASE"
 chmod 700 "$SERVICE_BASE"
 if [[ -f "$GROUPFILE" ]]; then
   read -r OLD_GROUP OLD_MARKER < "$GROUPFILE" || true
-  if [[ "${OLD_GROUP:-}" =~ ^[0-9]+$ ]] && (( OLD_GROUP > 1 )) &&
-      [[ -n "$(service_group_pids "$OLD_GROUP")" ]]; then
+  if [[ "${OLD_GROUP:-}" =~ ^[0-9]+$ ]] && (( OLD_GROUP > 1 )); then
+    OLD_PIDS="$(service_group_pids "$OLD_GROUP")" || {
+      echo "SERVICE_GROUP_ENUMERATION_FAILED: preserving startup metadata" >&2
+      exit 1
+    }
+    if [[ -n "$OLD_PIDS" ]]; then
     if service_group_verified "$OLD_GROUP" "${OLD_MARKER:-}"; then
       echo "SERVICE_GROUP_EXISTS: stop the existing group before starting another" >&2
     else
       echo "SERVICE_GROUP_UNVERIFIED: refusing duplicate startup" >&2
     fi
-    exit 1
+      exit 1
+    fi
   fi
   rm -f "$GROUPFILE" "$PIDFILE"
 fi
@@ -44,7 +49,12 @@ if ! command -v setsid >/dev/null 2>&1; then
   echo "SETSID_REQUIRED: cannot isolate hocker-node-agent service" >&2
   exit 1
 fi
-TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(16).toString('hex'))")"
+# NVM-only hosts have no Node before run.sh sources nvm.sh.
+if ! command -v od >/dev/null 2>&1; then
+  echo "SECURE_RANDOM_REQUIRED: od is not available" >&2
+  exit 1
+fi
+TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
 [[ "$TOKEN" =~ ^[a-f0-9]{32}$ ]] || { echo "SERVICE_MARKER_CREATION_FAILED" >&2; exit 1; }
 # A fresh session/process group isolates supervisor AND orphaned descendants.
 HOCKER_NODE_AGENT_SERVICE_SESSION="$TOKEN" setsid bash "$SCRIPT_DIR/run.sh" >/dev/null 2>&1 &
